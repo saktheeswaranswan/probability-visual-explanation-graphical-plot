@@ -1,0 +1,169 @@
+let sketch = (p) => {
+  let points = [];
+  let m, b, r2;
+  const numPoints = 260;
+  let selectedPoint = null;
+  let dragging = false;
+
+  p.setup = () => {
+    p.createCanvas(800, 600);
+    generateData();
+  };
+
+  function generateData() {
+    points = [];
+    for (let i = 0; i < numPoints; i++) {
+      let x = p.random(50, p.width - 150);
+      let y = 0.5 * x + p.random(-50, 50) + 100;
+      points.push({ x, y });
+    }
+    let lr = linearRegression(points);
+    m = lr.m;
+    b = lr.b;
+    r2 = computeR2(points, m, b);
+    selectedPoint = null;
+    dragging = false;
+  }
+
+  function linearRegression(data) {
+    let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+    for (let pnt of data) {
+      sumX += pnt.x;
+      sumY += pnt.y;
+      sumXY += pnt.x * pnt.y;
+      sumXX += pnt.x * pnt.x;
+    }
+    let m = (data.length * sumXY - sumX * sumY) /
+            (data.length * sumXX - sumX * sumX);
+    let b = (sumY - m * sumX) / data.length;
+    return { m, b };
+  }
+
+  function computeR2(data, m, b) {
+    let meanY = data.reduce((a, pnt) => a + pnt.y, 0) / data.length;
+    let ssTot = data.reduce((a, pnt) => a + Math.pow(pnt.y - meanY, 2), 0);
+    let ssRes = data.reduce((a, pnt) => a + Math.pow(pnt.y - (m * pnt.x + b), 2), 0);
+    return 1 - ssRes / ssTot;
+  }
+
+  function drawScatter(data) {
+    p.fill(50, 100, 200, 150);
+    p.noStroke();
+    for (let pt of data) {
+      p.ellipse(pt.x, pt.y, 6, 6);
+    }
+  }
+
+  function drawRegressionLine(m, b) {
+    p.stroke(200, 0, 0);
+    p.strokeWeight(2);
+    p.line(50, m * 50 + b, p.width - 150, m * (p.width - 150) + b);
+  }
+
+  function drawBoxPlot(data) {
+    let xs = data.map(d => d.x).sort((a, b) => a - b);
+    let q1 = xs[Math.floor(xs.length / 4)];
+    let median = xs[Math.floor(xs.length / 2)];
+    let q3 = xs[Math.floor(3 * xs.length / 4)];
+    let min = xs[0];
+    let max = xs[xs.length - 1];
+
+    let yBase = p.height - 50;
+    p.stroke(0);
+    p.noFill();
+
+    // Whiskers
+    p.line(min, yBase, q1, yBase);
+    p.line(q3, yBase, max, yBase);
+
+    // Box
+    p.rect(q1, yBase - 20, q3 - q1, 40);
+
+    // Median line
+    p.line(median, yBase - 20, median, yBase + 20);
+
+    // Min/Max ticks
+    p.line(min, yBase - 10, min, yBase + 10);
+    p.line(max, yBase - 10, max, yBase + 10);
+
+    p.noStroke();
+    p.fill(0);
+    p.textAlign(p.CENTER, p.TOP);
+    p.text(`Q1`, q1, yBase + 25);
+    p.text(`Median`, median, yBase + 25);
+    p.text(`Q3`, q3, yBase + 25);
+  }
+
+  function drawGaussianCurve(mean, stdDev, baseY) {
+    p.stroke(0, 150, 0);
+    p.noFill();
+    p.beginShape();
+    for (let x = mean - 3 * stdDev; x <= mean + 3 * stdDev; x += 1) {
+      let y = baseY - (1 / (stdDev * Math.sqrt(2 * Math.PI))) * 
+              Math.exp(-0.5 * Math.pow((x - mean) / stdDev, 2)) * 8000;
+      p.vertex(x, y);
+    }
+    p.endShape();
+  }
+
+  p.draw = () => {
+    p.background(255);
+
+    // scatter
+    drawScatter(points);
+
+    // regression
+    drawRegressionLine(m, b);
+
+    // box plot at bottom
+    drawBoxPlot(points);
+
+    // selected point Gaussian below point
+    if (selectedPoint) {
+      let mean = selectedPoint.x;
+      let stdDev = 30;
+      let baseY = selectedPoint.y + 100; // place distribution below the point
+      drawGaussianCurve(mean, stdDev, baseY);
+      p.fill(0);
+      p.textAlign(p.LEFT, p.TOP);
+      p.text(`Mean: ${mean.toFixed(1)}, StdDev: ${stdDev}`, mean + 10, baseY - 80);
+    }
+
+    // show R²
+    p.noStroke();
+    p.fill(0);
+    p.textSize(14);
+    p.text(`R² = ${r2.toFixed(3)}`, p.width - 140, p.height - 30);
+  };
+
+  p.mousePressed = () => {
+    for (let pt of points) {
+      if (p.dist(p.mouseX, p.mouseY, pt.x, pt.y) < 6) {
+        selectedPoint = pt;
+        dragging = true;
+        return;
+      }
+    }
+    selectedPoint = null;
+  };
+
+  p.mouseDragged = () => {
+    if (dragging && selectedPoint) {
+      selectedPoint.x = p.mouseX;
+      // Keep y on regression line while dragging
+      selectedPoint.y = m * selectedPoint.x + b;
+    }
+  };
+
+  p.mouseReleased = () => {
+    dragging = false;
+  };
+
+  p.keyPressed = () => {
+    if (p.key === 'R' || p.key === 'r') {
+      generateData();
+    }
+  };
+};
+
+new p5(sketch);

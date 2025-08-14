@@ -1,0 +1,334 @@
+/*
+Debug-ready p5.js sketch: Scatter with linear regression and marginal distributions
+Drop this into the p5.js editor (global mode) and press Run.
+
+Changes from previous version (debug-focused):
+ - continuous draw() (no noLoop) so you see output while debugging
+ - all color(...) calls happen inside setup()
+ - try/catch around draw() to catch runtime errors and log to console
+ - guarded use of drawingContext.setLineDash (won't crash if unsupported)
+ - explicit console.log of generated points for quick sanity check
+ - clearer on-screen debug banner and messages
+*/
+
+let points = [];
+let clusters = [];
+let slope = 0.9;      // true underlying slope used for data generation
+let intercept = 20;   // true underlying intercept
+
+// canvas / plot layout
+const CANVAS_W = 900;
+const CANVAS_H = 600;
+const MARGIN_LEFT = 80;
+const MARGIN_TOP = 80;
+const PLOT_W = 600;
+const PLOT_H = 420;
+const HIST_TOP_H = 60;   // area above plot for X histogram
+const HIST_RIGHT_W = 80; // area to right of plot for Y histogram
+
+function setup() {
+  createCanvas(CANVAS_W, CANVAS_H);
+  // define clusters here so color() works
+  clusters = [
+    {cx: 20, sx: 6, dy: -15, n: 80, col: null},
+    {cx: 50, sx: 5, dy: 10, n: 120, col: null},
+    {cx: 80, sx: 8, dy: 5, n: 60, col: null}
+  ];
+
+  // set actual p5 colors inside setup
+  clusters[0].col = color(66, 135, 245, 180);
+  clusters[1].col = color(245, 100, 66, 180);
+  clusters[2].col = color(66, 245, 122, 180);
+
+  generateData();
+  console.log('generateData finished — points:', points.length);
+}
+
+function draw() {
+  try {
+    background(255);
+    textSize(12);
+    fill(0);
+    text('DEBUG: running draw() — open console (F12) for logs/errors', 10, 14);
+
+    // sanity check: ensure points exist
+    if (!points || points.length === 0) {
+      fill(0);
+      text('No points generated — check generateData()', 10, 40);
+      return;
+    }
+
+    // compute data bounds
+    let xvals = points.map(p => p.x);
+    let yvals = points.map(p => p.y);
+    let minX = Math.min(...xvals);
+    let maxX = Math.max(...xvals);
+    let minY = Math.min(...yvals);
+    let maxY = Math.max(...yvals);
+
+    // pad
+    const padX = (maxX - minX) * 0.08 || 1;
+    const padY = (maxY - minY) * 0.08 || 1;
+    minX -= padX; maxX += padX;
+    minY -= padY; maxY += padY;
+
+    // draw the main plot area
+    const px = MARGIN_LEFT;
+    const py = MARGIN_TOP + HIST_TOP_H;
+    stroke(200);
+    fill(250);
+    rect(px - 1, py - 1, PLOT_W + 1, PLOT_H + 1);
+
+    // draw axes
+    drawAxes(px, py, PLOT_W, PLOT_H, minX, maxX, minY, maxY);
+
+    // histograms
+    drawXHistogram(px, py, PLOT_W, HIST_TOP_H, minX, maxX);
+    drawYHistogram(px + PLOT_W, py, HIST_RIGHT_W, PLOT_H, minY, maxY);
+
+    // draw scatter (points)
+    drawScatter(px, py, PLOT_W, PLOT_H, minX, maxX, minY, maxY);
+
+    // compute regression
+    let {m, b} = linearRegression(points);
+    drawRegressionLine(px, py, PLOT_W, PLOT_H, minX, maxX, minY, maxY, m, b);
+
+    // R^2
+    const r2 = computeR2(points, m, b);
+
+    // display stats
+    noStroke();
+    fill(0);
+    textSize(14);
+    textAlign(LEFT, TOP);
+    text(`Fitted line: y = ${m.toFixed(3)} x + ${b.toFixed(3)}`, px + PLOT_W + 12, py + 8);
+    text(`R² = ${r2.toFixed(3)}`, px + PLOT_W + 12, py + 26);
+
+    // legend for clusters
+    drawLegend(px + PLOT_W + 12, py + 60);
+
+  } catch (e) {
+    console.error('Error in draw():', e);
+    noLoop();
+    background(255);
+    fill(0);
+    text('Sketch error — see console (F12).', 10, 40);
+  }
+}
+
+function generateData() {
+  points = [];
+  clusters.forEach((cl) => {
+    for (let i = 0; i < cl.n; i++) {
+      // X distribution is gaussian around cx
+      let x = randomGaussian() * cl.sx + cl.cx;
+      // y is roughly linear in x plus cluster-specific vertical offset and noise
+      let y = slope * x + intercept + cl.dy + randomGaussian() * 6;
+      points.push({x: x, y: y, col: cl.col});
+    }
+  });
+}
+
+function drawAxes(px, py, w, h, minX, maxX, minY, maxY) {
+  stroke(120);
+  strokeWeight(1);
+  // x axis
+  line(px, py + h, px + w, py + h);
+  // y axis
+  line(px, py, px, py + h);
+
+  // ticks and labels
+  textSize(11);
+  fill(50);
+  noStroke();
+  textAlign(CENTER, TOP);
+  const xticks = 6;
+  for (let i = 0; i <= xticks; i++) {
+    const t = i / xticks;
+    const x = px + t * w;
+    const val = lerp(minX, maxX, t);
+    stroke(200);
+    line(x, py + h, x, py + h + 6);
+    noStroke();
+    text(val.toFixed(1), x, py + h + 8);
+  }
+
+  textAlign(RIGHT, CENTER);
+  const yticks = 6;
+  for (let i = 0; i <= yticks; i++) {
+    const t = i / yticks;
+    const y = py + (1 - t) * h;
+    const val = lerp(minY, maxY, t);
+    stroke(200);
+    line(px - 6, y, px, y);
+    noStroke();
+    text(val.toFixed(1), px - 8, y);
+  }
+}
+
+function drawScatter(px, py, w, h, minX, maxX, minY, maxY) {
+  points.forEach(p => {
+    const sx = map(p.x, minX, maxX, px, px + w);
+    const sy = map(p.y, minY, maxY, py + h, py);
+    noStroke();
+    fill(p.col);
+    ellipse(sx, sy, 6, 6);
+
+    // small rug marks on axes (for density visualization)
+    stroke(0, 30);
+    strokeWeight(1);
+    // rug on bottom
+    line(sx, py + h + 2, sx, py + h + 6);
+    // rug on left (y)
+    line(px - 6, sy, px - 2, sy);
+  });
+}
+
+function drawRegressionLine(px, py, w, h, minX, maxX, minY, maxY, m, b) {
+  // compute two x-extents
+  const x1 = minX;
+  const x2 = maxX;
+  const y1 = m * x1 + b;
+  const y2 = m * x2 + b;
+  const sx1 = map(x1, minX, maxX, px, px + w);
+  const sx2 = map(x2, minX, maxX, px, px + w);
+  const sy1 = map(y1, minY, maxY, py + h, py);
+  const sy2 = map(y2, minY, maxY, py + h, py);
+
+  stroke(0);
+  strokeWeight(2);
+  line(sx1, sy1, sx2, sy2);
+
+  // dashed 'true' generation line for comparison (guarded)
+  stroke(0, 100);
+  strokeWeight(1);
+  if (typeof drawingContext !== 'undefined' && drawingContext.setLineDash) {
+    drawingContext.setLineDash([5, 5]);
+    const ty1 = slope * x1 + intercept;
+    const ty2 = slope * x2 + intercept;
+    const tsy1 = map(ty1, minY, maxY, py + h, py);
+    const tsy2 = map(ty2, minY, maxY, py + h, py);
+    line(sx1, tsy1, sx2, tsy2);
+    drawingContext.setLineDash([]);
+  } else {
+    // fallback: solid thin line (won't crash)
+    const ty1 = slope * x1 + intercept;
+    const ty2 = slope * x2 + intercept;
+    const tsy1 = map(ty1, minY, maxY, py + h, py);
+    const tsy2 = map(ty2, minY, maxY, py + h, py);
+    line(sx1, tsy1, sx2, tsy2);
+  }
+}
+
+function drawXHistogram(px, py, w, histH, minX, maxX) {
+  const bins = 30;
+  let counts = new Array(bins).fill(0);
+  points.forEach(p => {
+    let t = (p.x - minX) / (maxX - minX);
+    let idx = Math.floor(constrain(t * bins, 0, bins - 1));
+    counts[idx]++;
+  });
+  const maxCount = Math.max(...counts) || 1;
+
+  // draw background for hist
+  noStroke();
+  fill(245);
+  rect(px, py - histH, w, histH);
+
+  // draw bars
+  for (let i = 0; i < bins; i++) {
+    let x = px + (i / bins) * w;
+    let bw = w / bins;
+    let hScaled = (counts[i] / maxCount) * (histH - 10);
+    fill(100, 140, 240, 200);
+    rect(x, py - hScaled, bw - 1, hScaled);
+  }
+
+  // axis line
+  stroke(150);
+  line(px, py, px + w, py);
+}
+
+function drawYHistogram(px, py, histW, h, minY, maxY) {
+  const bins = 30;
+  let counts = new Array(bins).fill(0);
+  points.forEach(p => {
+    let t = (p.y - minY) / (maxY - minY);
+    let idx = Math.floor(constrain(t * bins, 0, bins - 1));
+    counts[idx]++;
+  });
+  const maxCount = Math.max(...counts) || 1;
+
+  // draw background
+  noStroke();
+  fill(245);
+  rect(px, py, histW, h);
+
+  // draw bars stacked from top to bottom (flip y)
+  for (let i = 0; i < bins; i++) {
+    let y = py + (i / bins) * h;
+    let bh = h / bins;
+    let wScaled = (counts[i] / maxCount) * (histW - 10);
+    fill(255, 120, 120, 200);
+    rect(px, y, wScaled, bh - 1);
+  }
+
+  // axis line
+  stroke(150);
+  line(px, py, px, py + h);
+}
+
+// linear least-squares fit (returns slope m and intercept b)
+function linearRegression(data) {
+  const n = data.length;
+  let sumx = 0, sumy = 0, sumxy = 0, sumxx = 0;
+  data.forEach(p => {
+    sumx += p.x;
+    sumy += p.y;
+    sumxy += p.x * p.y;
+    sumxx += p.x * p.x;
+  });
+  const denom = (n * sumxx - sumx * sumx);
+  const m = denom === 0 ? 0 : (n * sumxy - sumx * sumy) / denom;
+  const b = (sumy - m * sumx) / n;
+  return {m: m, b: b};
+}
+
+function computeR2(data, m, b) {
+  const n = data.length;
+  let meanY = data.reduce((acc, p) => acc + p.y, 0) / n;
+  let ssTot = 0, ssRes = 0;
+  data.forEach(p => {
+    const yhat = m * p.x + b;
+    ssTot += (p.y - meanY) ** 2;
+    ssRes += (p.y - yhat) ** 2;
+  });
+  return ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+}
+
+function drawLegend(x, y) {
+  textSize(12);
+  noStroke();
+  textAlign(LEFT, TOP);
+  text('Clusters (generation colors):', x, y);
+  let yy = y + 18;
+  clusters.forEach((cl, i) => {
+    fill(cl.col);
+    rect(x, yy, 12, 12);
+    fill(0);
+    text(`cluster ${i+1} (n=${cl.n})`, x + 18, yy - 2);
+    yy += 18;
+  });
+  // explanation
+  textSize(11);
+  text('* Solid black = fitted least squares line', x, yy + 6);
+  text('* Thin gray = true generation line', x, yy + 20);
+}
+
+// simple keyboard control: press R to regenerate data
+function keyPressed() {
+  if (key === 'R' || key === 'r') {
+    generateData();
+    console.log('Regenerated data; points =', points.length);
+  }
+}

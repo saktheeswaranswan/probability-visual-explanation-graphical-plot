@@ -1,0 +1,468 @@
+/*
+Fixed p5.js sketch: helper functions attached to `window` and `draw()` moved
+below helper definitions to avoid scope/hoisting problems in the editor.
+
+Paste into the p5.js editor (global mode) and press Run.
+
+Keyboard:
+ - R = regenerate data
+*/
+
+let points = [];
+let clusters = [];
+let slope = 0.9;      // true underlying slope used for data generation
+let intercept = 20;   // true underlying intercept
+
+// canvas / plot layout
+const CANVAS_W = 900;
+const CANVAS_H = 600;
+const MARGIN_LEFT = 80;
+const MARGIN_TOP = 80;
+const PLOT_W = 600;
+const PLOT_H = 420;
+const HIST_TOP_H = 60;   // area above plot for X histogram
+const HIST_RIGHT_W = 80; // area to right of plot for Y histogram
+
+// visualization parameters for the Gaussian peaks
+const samplesAlongLine = 28;      // how many sampled positions along the regression line
+const windowFraction = 0.12;      // fraction of x-range used as neighbor window for each sample
+const heightScale = 48;           // max height (in pixels) of the PDF ridge at peak
+const pdfSamples = 40;            // resolution of each Gaussian curve
+const minSigma = 0.5;             // minimum sigma (in data units) to avoid degenerate shapes
+
+// --- setup & data generation ---
+function setup() {
+  createCanvas(CANVAS_W, CANVAS_H);
+  // define clusters here so color() works
+  clusters = [
+    {cx: 20, sx: 6, dy: -15, n: 80, col: null},
+    {cx: 50, sx: 5, dy: 10, n: 120, col: null},
+    {cx: 80, sx: 8, dy: 5, n: 60, col: null}
+  ];
+
+  // set actual p5 colors inside setup
+  clusters[0].col = color(66, 135, 245, 180);
+  clusters[1].col = color(245, 100, 66, 180);
+  clusters[2].col = color(66, 245, 122, 180);
+
+  generateData();
+  console.log('generateData finished — points:', points.length);
+}
+
+// define helpers as properties on window immediately to avoid scope issues
+window.generateData = function() {
+  points = [];
+  clusters.forEach((cl) => {
+    for (let i = 0; i < cl.n; i++) {
+      // X distribution is gaussian around cx
+      let x = randomGaussian() * cl.sx + cl.cx;
+      // y is roughly linear in x plus cluster-specific vertical offset and noise
+      let y = slope * x + intercept + cl.dy + randomGaussian() * 6;
+      points.push({x: x, y: y, col: cl.col});
+    }
+  });
+};
+
+window.linearRegression = function(data) {
+  const n = data.length;
+  let sumx = 0, sumy = 0, sumxy = 0, sumxx = 0;
+  data.forEach(p => {
+    sumx += p.x;
+    sumy += p.y;
+    sumxy += p.x * p.y;
+    sumxx += p.x * p.x;
+  });
+  const denom = (n * sumxx - sumx * sumx);
+  const m = denom === 0 ? 0 : (n * sumxy - sumx * sumy) / denom;
+  const b = (sumy - m * sumx) / n;
+  return {m: m, b: b};
+};
+
+window.computeR2 = function(data, m, b) {
+  const n = data.length;
+  let meanY = data.reduce((acc, p) => acc + p.y, 0) / n;
+  let ssTot = 0, ssRes = 0;
+  data.forEach(p => {
+    const yhat = m * p.x + b;
+    ssTot += (p.y - meanY) ** 2;
+    ssRes += (p.y - yhat) ** 2;
+  });
+  return ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+};
+
+window.drawAxes = function(px, py, w, h, minX, maxX, minY, maxY) {
+  stroke(120);
+  strokeWeight(1);
+  // x axis
+  line(px, py + h, px + w, py + h);
+  // y axis
+  line(px, py, px, py + h);
+
+  // ticks and labels
+  textSize(11);
+  fill(50);
+  noStroke();
+  textAlign(CENTER, TOP);
+  const xticks = 6;
+  for (let i = 0; i <= xticks; i++) {
+    const t = i / xticks;
+    const x = px + t * w;
+    const val = lerp(minX, maxX, t);
+    stroke(200);
+    line(x, py + h, x, py + h + 6);
+    noStroke();
+    text(val.toFixed(1), x, py + h + 8);
+  }
+
+  textAlign(RIGHT, CENTER);
+  const yticks = 6;
+  for (let i = 0; i <= yticks; i++) {
+    const t = i / yticks;
+    const y = py + (1 - t) * h;
+    const val = lerp(minY, maxY, t);
+    stroke(200);
+    line(px - 6, y, px, y);
+    noStroke();
+    text(val.toFixed(1), px - 8, y);
+  }
+};
+
+window.drawXHistogram = function(px, py, w, histH, minX, maxX) {
+  const bins = 30;
+  let counts = new Array(bins).fill(0);
+  points.forEach(p => {
+    let t = (p.x - minX) / (maxX - minX);
+    let idx = Math.floor(constrain(t * bins, 0, bins - 1));
+    counts[idx]++;
+  });
+  const maxCount = Math.max(...counts) || 1;
+
+  // draw background for hist
+  noStroke();
+  fill(245);
+  rect(px, py - histH, w, histH);
+
+  // draw bars
+  for (let i = 0; i < bins; i++) {
+    let x = px + (i / bins) * w;
+    let bw = w / bins;
+    let hScaled = (counts[i] / maxCount) * (histH - 10);
+    fill(100, 140, 240, 200);
+    rect(x, py - hScaled, bw - 1, hScaled);
+  }
+
+  // axis line
+  stroke(150);
+  line(px, py, px + w, py);
+};
+
+window.drawYHistogram = function(px, py, histW, h, minY, maxY) {
+  const bins = 30;
+  let counts = new Array(bins).fill(0);
+  points.forEach(p => {
+    let t = (p.y - minY) / (maxY - minY);
+    let idx = Math.floor(constrain(t * bins, 0, bins - 1));
+    counts[idx]++;
+  });
+  const maxCount = Math.max(...counts) || 1;
+
+  // draw background
+  noStroke();
+  fill(245);
+  rect(px, py, histW, h);
+
+  // draw bars stacked from top to bottom (flip y)
+  for (let i = 0; i < bins; i++) {
+    let y = py + (i / bins) * h;
+    let bh = h / bins;
+    let wScaled = (counts[i] / maxCount) * (histW - 10);
+    fill(255, 120, 120, 200);
+    rect(px, y, wScaled, bh - 1);
+  }
+
+  // axis line
+  stroke(150);
+  line(px, py, px, py + h);
+};
+
+window.drawScatter = function(px, py, w, h, minX, maxX, minY, maxY) {
+  points.forEach(p => {
+    const sx = map(p.x, minX, maxX, px, px + w);
+    const sy = map(p.y, minY, maxY, py + h, py);
+    noStroke();
+    fill(p.col);
+    ellipse(sx, sy, 6, 6);
+
+    // small rug marks on axes (for density visualization)
+    stroke(0, 30);
+    strokeWeight(1);
+    // rug on bottom
+    line(sx, py + h + 2, sx, py + h + 6);
+    // rug on left (y)
+    line(px - 6, sy, px - 2, sy);
+  });
+};
+
+window.drawRegressionLine = function(px, py, w, h, minX, maxX, minY, maxY, m, b) {
+  // compute two x-extents
+  const x1 = minX;
+  const x2 = maxX;
+  const y1 = m * x1 + b;
+  const y2 = m * x2 + b;
+  const sx1 = map(x1, minX, maxX, px, px + w);
+  const sx2 = map(x2, minX, maxX, px, px + w);
+  const sy1 = map(y1, minY, maxY, py + h, py);
+  const sy2 = map(y2, minY, maxY, py + h, py);
+
+  stroke(0);
+  strokeWeight(2);
+  line(sx1, sy1, sx2, sy2);
+
+  // dashed 'true' generation line for comparison (guarded)
+  stroke(0, 100);
+  strokeWeight(1);
+  if (typeof drawingContext !== 'undefined' && drawingContext.setLineDash) {
+    drawingContext.setLineDash([5, 5]);
+    const ty1 = slope * x1 + intercept;
+    const ty2 = slope * x2 + intercept;
+    const tsy1 = map(ty1, minY, maxY, py + h, py);
+    const tsy2 = map(ty2, minY, maxY, py + h, py);
+    line(sx1, tsy1, sx2, tsy2);
+    drawingContext.setLineDash([]);
+  } else {
+    // fallback: solid thin line (won't crash)
+    const ty1 = slope * x1 + intercept;
+    const ty2 = slope * x2 + intercept;
+    const tsy1 = map(ty1, minY, maxY, py + h, py);
+    const tsy2 = map(ty2, minY, maxY, py + h, py);
+    line(sx1, tsy1, sx2, tsy2);
+  }
+};
+
+window.drawGaussPeaksAlongLine = function(m, b, minX, maxX, minY, maxY, px, py, w, h) {
+  // precompute pixel-per-data conversions
+  const pxPerDataX = w / (maxX - minX);
+  const pyPerDataY = h / (maxY - minY);
+
+  // unit perpendicular in data coords: v = (-m, 1) / sqrt(1 + m^2)
+  const vdx = -m / Math.sqrt(1 + m * m);
+  const vdy = 1  / Math.sqrt(1 + m * m);
+  // unit tangent in data coords: t = (1, m) / sqrt(1+m^2)
+  const tdx = 1  / Math.sqrt(1 + m * m);
+  const tdy = m / Math.sqrt(1 + m * m);
+
+  // pixel vectors corresponding to one data-unit movement along perp/tangent
+  const perpPixel = { x: vdx * pxPerDataX, y: -vdy * pyPerDataY };
+  const tanPixel  = { x: tdx * pxPerDataX, y: -tdy * pyPerDataY };
+
+  // normalize tangent pixel to unit length for height scaling
+  const tanLen = Math.hypot(tanPixel.x, tanPixel.y) || 1;
+  const tanUnit = { x: tanPixel.x / tanLen, y: tanPixel.y / tanLen };
+
+  const windowWidth = (maxX - minX) * windowFraction;
+
+  for (let i = 0; i < samplesAlongLine; i++) {
+    const t = i / (samplesAlongLine - 1);
+    const xi = lerp(minX, maxX, t);
+    const yi = m * xi + b;
+
+    // collect signed perpendicular residuals of nearby points (in data units)
+    const residuals = [];
+    for (let p of points) {
+      if (Math.abs(p.x - xi) <= windowWidth / 2) {
+        // signed perpendicular distance
+        const signed = (p.y - (m * p.x + b)) / Math.sqrt(1 + m * m);
+        residuals.push(signed);
+      }
+    }
+
+    // if too few neighbors, skip or use a fallback
+    if (residuals.length < 4) continue;
+
+    // compute sigma (std) of residuals
+    const mean = residuals.reduce((a, b) => a + b, 0) / residuals.length;
+    const varr = residuals.reduce((acc, r) => acc + (r - mean) * (r - mean), 0) / residuals.length;
+    const sigma = Math.max(Math.sqrt(varr), minSigma);
+
+    // sample s from -3sigma..+3sigma and compute normalized PDF
+    const sMin = -3 * sigma;
+    const sMax =  3 * sigma;
+
+    // build polygon points for the Gaussian ridge (top side)
+    const topPts = [];
+    for (let j = 0; j <= pdfSamples; j++) {
+      const u = j / pdfSamples;
+      const s = lerp(sMin, sMax, u); // data units across perpendicular
+      const pdf = Math.exp(-0.5 * (s * s) / (sigma * sigma)) / (sigma * Math.sqrt(2 * Math.PI));
+      // normalize by peak pdf (so 0..1)
+      const pdfNorm = pdf / (1 / (sigma * Math.sqrt(2 * Math.PI)));
+
+      // base screen position of the regression line at xi
+      const sx = map(xi, minX, maxX, px, px + w);
+      const sy = map(yi, minY, maxY, py + h, py);
+
+      // perpendicular offset in pixels for s data units
+      const perpOffX = perpPixel.x * s;
+      const perpOffY = perpPixel.y * s;
+
+      // height along the tangent in pixels proportional to pdfNorm
+      const height = pdfNorm * heightScale;
+      const tanOffX = tanUnit.x * height;
+      const tanOffY = tanUnit.y * height;
+
+      // point = base + perpOffset + tanOffset
+      topPts.push({ x: sx + perpOffX + tanOffX, y: sy + perpOffY + tanOffY });
+    }
+
+    // bottom side (mirrored with negative height) to close the polygon
+    const botPts = [];
+    for (let j = pdfSamples; j >= 0; j--) {
+      const u = j / pdfSamples;
+      const s = lerp(sMin, sMax, u);
+      const pdf = Math.exp(-0.5 * (s * s) / (sigma * sigma)) / (sigma * Math.sqrt(2 * Math.PI));
+      const pdfNorm = pdf / (1 / (sigma * Math.sqrt(2 * Math.PI)));
+      const sx = map(xi, minX, maxX, px, px + w);
+      const sy = map(yi, minY, maxY, py + h, py);
+      const perpOffX = perpPixel.x * s;
+      const perpOffY = perpPixel.y * s;
+      const height = -pdfNorm * (heightScale * 0.5); // smaller negative side for nicer shape
+      const tanOffX = tanUnit.x * height;
+      const tanOffY = tanUnit.y * height;
+      botPts.push({ x: sx + perpOffX + tanOffX, y: sy + perpOffY + tanOffY });
+    }
+
+    // draw filled ridge
+    noStroke();
+    fill(120, 200, 180, 150);
+    beginShape();
+    for (let p of topPts) vertex(p.x, p.y);
+    for (let p of botPts) vertex(p.x, p.y);
+    endShape(CLOSE);
+
+    // outline
+    stroke(40, 100);
+    strokeWeight(1);
+    noFill();
+    beginShape();
+    for (let p of topPts) vertex(p.x, p.y);
+    for (let p of botPts) vertex(p.x, p.y);
+    endShape(CLOSE);
+  }
+};
+
+window.drawLegend = function(x, y) {
+  textSize(12);
+  noStroke();
+  textAlign(LEFT, TOP);
+  text('Clusters (generation colors):', x, y);
+  let yy = y + 18;
+  clusters.forEach((cl, i) => {
+    fill(cl.col);
+    rect(x, yy, 12, 12);
+    fill(0);
+    text(`cluster ${i+1} (n=${cl.n})`, x + 18, yy - 2);
+    yy += 18;
+  });
+  // explanation
+  textSize(11);
+  text('* Solid black = fitted least squares line', x, yy + 6);
+  text('* Thin gray = true generation line', x, yy + 20);
+};
+
+// simple keyboard control: press R to regenerate data
+window.keyPressed = function() {
+  if (key === 'R' || key === 'r') {
+    generateData();
+    console.log('Regenerated data; points =', points.length);
+  }
+};
+
+// --- main draw() comes after helpers to avoid any scope/timing issues ---
+function draw() {
+  try {
+    background(255);
+    textSize(12);
+    fill(0);
+    text('DEBUG: running draw() — open console (F12) for logs/errors', 10, 14);
+
+    // sanity check: ensure points exist
+    if (!points || points.length === 0) {
+      fill(0);
+      text('No points generated — check generateData()', 10, 40);
+      return;
+    }
+
+    // compute data bounds
+    let xvals = points.map(p => p.x);
+    let yvals = points.map(p => p.y);
+    let minX = Math.min(...xvals);
+    let maxX = Math.max(...xvals);
+    let minY = Math.min(...yvals);
+    let maxY = Math.max(...yvals);
+
+    // pad
+    const padX = (maxX - minX) * 0.08 || 1;
+    const padY = (maxY - minY) * 0.08 || 1;
+    minX -= padX; maxX += padX;
+    minY -= padY; maxY += padY;
+
+    // draw the main plot area
+    const px = MARGIN_LEFT;
+    const py = MARGIN_TOP + HIST_TOP_H;
+    stroke(200);
+    fill(250);
+    rect(px - 1, py - 1, PLOT_W + 1, PLOT_H + 1);
+
+    // draw axes
+    window.drawAxes(px, py, PLOT_W, PLOT_H, minX, maxX, minY, maxY);
+
+    // histograms
+    window.drawXHistogram(px, py, PLOT_W, HIST_TOP_H, minX, maxX);
+    window.drawYHistogram(px + PLOT_W, py, HIST_RIGHT_W, PLOT_H, minY, maxY);
+
+    // draw scatter (points)
+    window.drawScatter(px, py, PLOT_W, PLOT_H, minX, maxX, minY, maxY);
+
+    // compute regression
+    let {m, b} = window.linearRegression(points);
+    window.drawRegressionLine(px, py, PLOT_W, PLOT_H, minX, maxX, minY, maxY, m, b);
+
+    // draw gaussian peaks along the regression line
+    window.drawGaussPeaksAlongLine(m, b, minX, maxX, minY, maxY, px, py, PLOT_W, PLOT_H);
+
+    // R^2
+    const r2 = window.computeR2(points, m, b);
+
+    // display stats
+    noStroke();
+    fill(0);
+    textSize(14);
+    textAlign(LEFT, TOP);
+    text(`Fitted line: y = ${m.toFixed(3)} x + ${b.toFixed(3)}`, px + PLOT_W + 12, py + 8);
+    text(`R² = ${r2.toFixed(3)}`, px + PLOT_W + 12, py + 26);
+
+    // legend for clusters
+    window.drawLegend(px + PLOT_W + 12, py + 60);
+
+  } catch (e) {
+    console.error('Error in draw():', e);
+    noLoop();
+    background(255);
+    fill(0);
+    text('Sketch error — see console (F12).', 10, 40);
+  }
+}
+
+// final safety: ensure helpers available on window
+if (typeof window !== 'undefined') {
+  window.generateData = window.generateData || generateData;
+  window.linearRegression = window.linearRegression || linearRegression;
+  window.computeR2 = window.computeR2 || computeR2;
+  window.drawAxes = window.drawAxes || drawAxes;
+  window.drawXHistogram = window.drawXHistogram || drawXHistogram;
+  window.drawYHistogram = window.drawYHistogram || drawYHistogram;
+  window.drawScatter = window.drawScatter || drawScatter;
+  window.drawRegressionLine = window.drawRegressionLine || drawRegressionLine;
+  window.drawGaussPeaksAlongLine = window.drawGaussPeaksAlongLine || drawGaussPeaksAlongLine;
+  window.drawLegend = window.drawLegend || drawLegend;
+}

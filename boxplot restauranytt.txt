@@ -1,0 +1,161 @@
+// p5.js sketch: Weekly box plots (weekdays vs weekend) for 1 year (52 weeks) with zooming ability
+
+let weeks = 52;
+let weeklyData = [];
+let margin = {top: 60, right: 40, bottom: 80, left: 80};
+let plotW, plotH;
+let maxIncome = 0;
+let zoomFactor = 1;
+let zoomCenterX = 0.5;
+
+function setup() {
+  createCanvas(1200, 600);
+  frameRate(30);
+  plotW = width - margin.left - margin.right;
+  plotH = height - margin.top - margin.bottom;
+  simulateData();
+  computeStats();
+}
+
+function mouseWheel(event) {
+  zoomFactor *= event.delta > 0 ? 1.1 : 0.9;
+  zoomFactor = constrain(zoomFactor, 0.5, 5);
+  zoomCenterX = constrain((mouseX - margin.left) / plotW, 0, 1);
+}
+
+function simulateData() {
+  weeklyData = [];
+  for (let w = 0; w < weeks; w++) {
+    let weekdays = [];
+    let weekend = [];
+    let seasonFactor = 1 + 0.15 * sin((TWO_PI * w) / weeks);
+    let wdMean = 1000 * seasonFactor + random(-50, 50);
+    let wdSd = 180 + random(-30, 30);
+    let weMean = wdMean * 1.25 + random(-20, 20);
+    let weSd = max(20, wdSd * 0.3 + random(-10, 10));
+    for (let i = 0; i < 5; i++) weekdays.push(max(0, round(randomGaussian(wdMean, wdSd))));
+    for (let i = 0; i < 2; i++) weekend.push(max(0, round(randomGaussian(weMean, weSd))));
+    weeklyData.push({weekdays, weekend});
+    let localMax = max(...weekdays.concat(weekend));
+    if (localMax > maxIncome) maxIncome = localMax;
+  }
+  maxIncome = ceil(maxIncome * 1.08);
+}
+
+function computeStats() {
+  for (let w = 0; w < weeks; w++) {
+    let wd = weeklyData[w].weekdays.slice().sort((a,b)=>a-b);
+    let we = weeklyData[w].weekend.slice().sort((a,b)=>a-b);
+    weeklyData[w].stats = {weekdays: boxStats(wd), weekend: boxStats(we)};
+  }
+}
+
+function boxStats(arr) {
+  if (!arr.length) return null;
+  let sorted = arr.slice().sort((a,b)=>a-b);
+  let q1 = quantile(sorted, 0.25);
+  let median = quantile(sorted, 0.5);
+  let q3 = quantile(sorted, 0.75);
+  let iqr = q3 - q1;
+  let lowerFence = q1 - 1.5 * iqr;
+  let upperFence = q3 + 1.5 * iqr;
+  let whiskerLow = sorted.find(v=>v >= lowerFence) || sorted[0];
+  let whiskerHigh = [...sorted].reverse().find(v=>v <= upperFence) || sorted[sorted.length-1];
+  return {min: sorted[0], q1, median, q3, max: sorted[sorted.length-1], iqr, whiskerLow, whiskerHigh};
+}
+
+function quantile(sorted, q) {
+  let pos = (sorted.length - 1) * q;
+  let base = floor(pos);
+  let rest = pos - base;
+  return sorted[base + 1] !== undefined ? sorted[base] + rest * (sorted[base + 1] - sorted[base]) : sorted[base];
+}
+
+function draw() {
+  background(255);
+  drawTitle();
+  push();
+  translate(margin.left, margin.top);
+  scale(zoomFactor, 1);
+  let xOffset = -zoomCenterX * plotW * (zoomFactor - 1);
+  translate(xOffset, 0);
+  drawAxes();
+  drawBoxPlots();
+  pop();
+  drawLegend();
+}
+
+function drawTitle() {
+  textAlign(CENTER, CENTER);
+  textSize(18);
+  fill(30);
+  text('Weekly Income (1 Year) — Weekdays vs Weekend (Zoom with Mouse Wheel)', width/2, margin.top/2);
+}
+
+function drawAxes() {
+  stroke(0);
+  line(0, 0, 0, plotH);
+  line(0, plotH, plotW, plotH);
+  let ticks = 6;
+  textAlign(RIGHT, CENTER);
+  for (let i = 0; i <= ticks; i++) {
+    let yVal = map(i, 0, ticks, maxIncome, 0);
+    let y = map(i, 0, ticks, 0, plotH);
+    stroke(200);
+    line(0, y, plotW, y);
+    noStroke();
+    fill(0);
+    text(nf(yVal,0,0), -8, y);
+  }
+}
+
+function drawBoxPlots() {
+  let spacing = plotW / weeks;
+  let boxWidth = min(24, spacing * 0.28);
+  for (let w = 0; w < weeks; w++) {
+    let baseX = map(w + 0.5, 0, weeks, 0, plotW);
+    drawSingleBox(baseX - boxWidth*0.7, boxWidth, weeklyData[w].stats.weekdays, false);
+    drawSingleBox(baseX + boxWidth*0.7, boxWidth, weeklyData[w].stats.weekend, true);
+  }
+}
+
+function drawSingleBox(cx, wbox, stats, isWeekend) {
+  if (!stats) return;
+  let y_q1 = map(stats.q1, 0, maxIncome, plotH, 0);
+  let y_q3 = map(stats.q3, 0, maxIncome, plotH, 0);
+  let y_med = map(stats.median, 0, maxIncome, plotH, 0);
+  let y_whLow = map(stats.whiskerLow, 0, maxIncome, plotH, 0);
+  let y_whHigh = map(stats.whiskerHigh, 0, maxIncome, plotH, 0);
+  let blinkOn = isWeekend && (floor(frameCount / 15) % 2 === 0);
+  stroke(0);
+  fill(isWeekend ? (blinkOn ? color(255, 220, 100, 200) : color(255, 245, 180, 120)) : color(200, 220, 255, 140));
+  line(cx, y_whHigh, cx, y_q3);
+  line(cx, y_q1, cx, y_whLow);
+  line(cx - wbox*0.35, y_whHigh, cx + wbox*0.35, y_whHigh);
+  line(cx - wbox*0.35, y_whLow, cx + wbox*0.35, y_whLow);
+  rectMode(CENTER);
+  rect(cx, (y_q1 + y_q3)/2, wbox, abs(y_q3 - y_q1));
+  strokeWeight(2);
+  stroke(isWeekend && blinkOn ? color(200, 40, 40) : color(40));
+  line(cx - wbox*0.5, y_med, cx + wbox*0.5, y_med);
+}
+
+function drawLegend() {
+  let lx = width - 360;
+  let ly = margin.top - 30;
+  fill(0);
+  textSize(12);
+  textAlign(LEFT, CENTER);
+  text('Legend:', lx, ly);
+  fill(200, 220, 255, 140);
+  rect(lx + 60, ly, 18, 12);
+  fill(0);
+  text('Weekdays - lower mean, higher variance', lx + 80, ly);
+  let blinkOn = (floor(frameCount / 15) % 2) === 0;
+  fill(blinkOn ? color(255, 220, 100, 200) : color(255, 245, 180, 120));
+  rect(lx + 60, ly + 22, 18, 12);
+  fill(0);
+  text('Weekend - higher mean, more consistent (blinking)', lx + 80, ly + 22);
+}
+
+function round(v) {return Math.round(v);}

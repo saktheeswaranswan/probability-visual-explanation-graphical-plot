@@ -1,0 +1,131 @@
+let rockShape = [];
+let impulseVectors = [];
+let patchCenter, patchNormal;
+let patchRadius = 30;
+let patchIndexSlider, reseedButton;
+
+function setup() {
+  createCanvas(800, 600, WEBGL);
+  angleMode(DEGREES);
+
+  // UI
+  createP("Patch Position Index (snap on rock):");
+  patchIndexSlider = createSlider(0, 100, 50, 1);
+
+  reseedButton = createButton("Reseed Impulse Vectors");
+  reseedButton.mousePressed(generateImpulseVectors);
+
+  // Generate noisy rock
+  noiseDetail(2, 0.5);
+  for (let theta = 0; theta <= 180; theta += 12) {
+    let ring = [];
+    for (let phi = 0; phi < 360; phi += 12) {
+      let r = 100 + noise(theta * 0.03, phi * 0.03) * 60;
+      let x = r * sin(theta) * cos(phi);
+      let y = r * sin(theta) * sin(phi);
+      let z = r * cos(theta);
+      ring.push(createVector(x, y, z));
+    }
+    rockShape.push(ring);
+  }
+
+  generateImpulseVectors();
+}
+
+function generateImpulseVectors() {
+  impulseVectors = [];
+  let gridSize = 5;
+  for (let x = 0; x < gridSize; x++) {
+    for (let y = 0; y < gridSize; y++) {
+      let fx = map(x, 0, gridSize - 1, -1, 1);
+      let fy = map(y, 0, gridSize - 1, -1, 1);
+      let dx = fx * patchRadius * 0.8;
+      let dy = fy * patchRadius * 0.8;
+      if (dx * dx + dy * dy <= patchRadius * patchRadius) {
+        impulseVectors.push({
+          dx,
+          dy,
+          freq: random(0.8, 2.5),  // Faster pulse frequency
+          phase: random(TWO_PI)
+        });
+      }
+    }
+  }
+}
+
+function draw() {
+  background(10);
+  orbitControl();
+  lights();
+
+  // Draw noisy rock surface
+  noFill();
+  stroke(180, 200, 255, 60);
+  for (let i = 0; i < rockShape.length - 1; i++) {
+    beginShape(TRIANGLE_STRIP);
+    for (let j = 0; j < rockShape[i].length; j++) {
+      vertex(rockShape[i][j].x, rockShape[i][j].y, rockShape[i][j].z);
+      vertex(rockShape[i + 1][j].x, rockShape[i + 1][j].y, rockShape[i + 1][j].z);
+    }
+    endShape();
+  }
+
+  // Patch center + normal
+  let flat = rockShape.flat();
+  let idx = constrain(patchIndexSlider.value(), 0, flat.length - 2);
+  patchCenter = flat[idx].copy();
+
+  // Normal via cross product of triangle on surface
+  let patchI = floor(idx / rockShape[0].length);
+  let patchJ = idx % rockShape[0].length;
+  if (patchI + 1 < rockShape.length && patchJ + 1 < rockShape[0].length) {
+    let a = rockShape[patchI + 1][patchJ];
+    let b = rockShape[patchI][patchJ + 1];
+    patchNormal = p5.Vector.cross(p5.Vector.sub(a, patchCenter), p5.Vector.sub(b, patchCenter)).normalize();
+  }
+
+  // Patch-local frame: build U-V basis
+  let tangent = abs(patchNormal.y) > 0.9 ? createVector(1, 0, 0) : createVector(0, 1, 0);
+  let u = p5.Vector.cross(patchNormal, tangent).normalize();
+  let v = p5.Vector.cross(patchNormal, u).normalize();
+
+  push();
+  translate(patchCenter.x, patchCenter.y, patchCenter.z);
+
+  // Align Z-axis with patchNormal
+  let axis = createVector(0, 0, 1).cross(patchNormal);
+  let angle = degrees(acos(createVector(0, 0, 1).dot(patchNormal)));
+  if (axis.mag() > 0.001) rotate(angle, axis);
+
+  // Blinking red patch
+  let blinkAlpha = 120 + 80 * sin(frameCount * 0.3); // Faster blinking
+  fill(255, 0, 0, blinkAlpha);
+  stroke(255);
+  strokeWeight(1.5);
+  ellipse(0, 0, patchRadius * 2, patchRadius * 2);
+
+  // Draw impulse arrows
+  for (let vec of impulseVectors) {
+    let tip = createVector(vec.dx, vec.dy, 0);
+    let magPulse = 10 + 8 * sin(frameCount * vec.freq + vec.phase);  // Stronger + faster pulse
+    let tail = createVector(vec.dx, vec.dy, magPulse);
+
+    stroke(255, 255, 0);
+    strokeWeight(1.2);
+    line(tail.x, tail.y, tail.z, tip.x, tip.y, tip.z);
+
+    // Arrowhead
+    push();
+    translate(tip.x, tip.y, tip.z);
+    let dir = p5.Vector.sub(tip, tail).normalize();
+    let headAxis = createVector(0, -1, 0).cross(dir);
+    let headAngle = degrees(acos(createVector(0, -1, 0).dot(dir)));
+    if (headAxis.mag() > 0.001) rotate(headAngle, headAxis);
+    fill(255, 0, 0, blinkAlpha);
+    noStroke();
+    cone(2.8, 6);
+    pop();
+  }
+
+  pop(); // Restore transform
+}

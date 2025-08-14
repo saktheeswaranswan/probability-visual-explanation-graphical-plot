@@ -1,0 +1,126 @@
+let rockShape = [];
+let impulseVectors = [];
+let patchCenter;
+let patchNormal;
+let patchRadius = 30;
+let patchIndexSlider;
+
+function setup() {
+  createCanvas(800, 600, WEBGL);
+  angleMode(DEGREES);
+
+  // UI
+  createP("Patch Position Index (snap on rock):");
+  patchIndexSlider = createSlider(0, 100, 50, 1);
+
+  // Generate noisy rock
+  noiseDetail(2, 0.5);
+  for (let theta = 0; theta <= 180; theta += 12) {
+    let ring = [];
+    for (let phi = 0; phi < 360; phi += 12) {
+      let r = 100 + noise(theta * 0.03, phi * 0.03) * 60;
+      let x = r * sin(theta) * cos(phi);
+      let y = r * sin(theta) * sin(phi);
+      let z = r * cos(theta);
+      ring.push(createVector(x, y, z));
+    }
+    rockShape.push(ring);
+  }
+}
+
+function draw() {
+  background(10);
+  orbitControl();
+  lights();
+
+  // Draw noisy rock mesh
+  noFill();
+  stroke(180, 200, 255, 60);
+  for (let i = 0; i < rockShape.length - 1; i++) {
+    beginShape(TRIANGLE_STRIP);
+    for (let j = 0; j < rockShape[i].length; j++) {
+      vertex(rockShape[i][j].x, rockShape[i][j].y, rockShape[i][j].z);
+      vertex(rockShape[i + 1][j].x, rockShape[i + 1][j].y, rockShape[i + 1][j].z);
+    }
+    endShape();
+  }
+
+  // Patch position & normal from slider
+  let flat = rockShape.flat();
+  let idx = constrain(patchIndexSlider.value(), 0, flat.length - 2);
+  patchCenter = flat[idx].copy();
+
+  let patchI = floor(idx / rockShape[0].length);
+  let patchJ = idx % rockShape[0].length;
+  if (patchI + 1 < rockShape.length && patchJ + 1 < rockShape[0].length) {
+    let a = rockShape[patchI + 1][patchJ];
+    let b = rockShape[patchI][patchJ + 1];
+    patchNormal = p5.Vector.cross(p5.Vector.sub(a, patchCenter), p5.Vector.sub(b, patchCenter)).normalize();
+  }
+
+  // Draw patch and impulse arrows
+  push();
+  translate(patchCenter.x, patchCenter.y, patchCenter.z);
+
+  // Align patch to normal
+  let axis = createVector(0, 0, 1).cross(patchNormal);
+  let angle = degrees(acos(createVector(0, 0, 1).dot(patchNormal)));
+  if (axis.mag() > 0.0001) rotate(angle, axis);
+
+  // Blinking red patch with white border
+  let blinkAlpha = 120 + 80 * sin(frameCount * 0.1);
+  fill(255, 0, 0, blinkAlpha);
+  stroke(255);
+  strokeWeight(2);
+  ellipse(0, 0, patchRadius * 2, patchRadius * 2);
+
+  // Tangent frame
+  let tangent = abs(patchNormal.y) > 0.9 ? createVector(1, 0, 0) : createVector(0, 1, 0);
+  let u = p5.Vector.cross(patchNormal, tangent).normalize();
+  let v = p5.Vector.cross(patchNormal, u).normalize();
+
+  // Generate impulse vectors with tips on patch surface
+  impulseVectors = [];
+  let gridSize = 5;
+  for (let x = 0; x < gridSize; x++) {
+    for (let y = 0; y < gridSize; y++) {
+      let fx = map(x, 0, gridSize - 1, -1, 1);
+      let fy = map(y, 0, gridSize - 1, -1, 1);
+      let dx = fx * patchRadius * 0.8;
+      let dy = fy * patchRadius * 0.8;
+
+      if (dx * dx + dy * dy <= patchRadius * patchRadius) {
+        let surfacePoint = p5.Vector.add(p5.Vector.mult(u, dx), p5.Vector.mult(v, dy));
+        let tip = surfacePoint.copy(); // Tip lands on the red patch
+        let origin = p5.Vector.add(tip, p5.Vector.mult(patchNormal, 12)); // Shaft starts above tip
+        let dir = p5.Vector.sub(tip, origin).normalize();
+        impulseVectors.push({ origin, dir });
+      }
+    }
+  }
+
+  // Draw arrows
+  for (let v of impulseVectors) {
+    let magnitude = 10 + 6 * sin(frameCount * 0.15);
+    let tail = p5.Vector.add(v.origin, p5.Vector.mult(v.dir, magnitude));
+
+    // Shaft
+    stroke(255, 255, 0);
+    strokeWeight(1);
+    line(v.origin.x, v.origin.y, v.origin.z, tail.x, tail.y, tail.z);
+
+    // Arrowhead
+    push();
+    translate(tail.x, tail.y, tail.z);
+    let coneDir = v.dir.copy().normalize();
+    let axis = createVector(0, -1, 0).cross(coneDir);
+    let angle = degrees(acos(createVector(0, -1, 0).dot(coneDir)));
+    if (axis.mag() > 0.001) rotate(angle, axis);
+    fill(255, 0, 0, blinkAlpha);
+    noStroke();
+    cone(2.5, 6);
+    pop();
+  }
+
+  pop(); // Restore transformation
+}

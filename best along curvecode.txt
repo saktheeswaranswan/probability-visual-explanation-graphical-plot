@@ -1,0 +1,639 @@
+/*
+Interactive p5.js (instance mode)
+— Scatter + regression (red)
+— Click a point → shows a **sideways (perpendicular) boxplot with whiskers** centered on the regression line at that point
+— Above the box (along the red line direction) it draws a smooth normal-shaped ridge of the local residual distribution
+— Drag the selected point and it will slide **on the red line**, updating stats live
+— Detailed local stats (mean, median, mode, variance, sd, IQR, CV, z, p-values) shown near the box
+— Global boxplot of Y (response) shown at the bottom for context
+
+Keys: R to regenerate data
+*/
+
+let sketch = (p) => {
+  // data & fit
+  let points = [];
+  let m = 0.5, b = 0, r2 = 0;
+  const N = 260;
+
+  // interaction
+  let selectedPoint = null;
+  let dragging = false;
+
+  // layout (canvas coords are data units)
+  const W = 900, H = 640;
+
+  // local window for estimating residual distribution around the selected x
+  const windowPixels = 120;     // points whose x is within this of the projection will be used
+  const ridgeHeight = 36;       // pixels: peak height of the green density ridge
+  const boxWidth = 24;          // visual thickness of the box (drawn along tangent)
+
+  p.setup = () => {
+    p.createCanvas(W, H);
+    generateData();
+  };
+
+  function generateData(){
+    points = [];
+    // 3 loose clusters around an underlying trend
+    const clusters = [
+      {cx: 140, sx: 60, dy: -35, n: 80},
+      {cx: 360, sx: 50, dy:  20, n: 120},
+      {cx: 650, sx: 70, dy:  10, n: 60}
+    ];
+    const trueSlope = 0.9, trueIntercept = 120;
+    for (const cl of clusters){
+      for (let i=0;i<cl.n;i++){
+        const x = p.randomGaussian(cl.cx, cl.sx);
+        const y = trueSlope * x + trueIntercept + cl.dy + p.randomGaussian(0, 12);
+        points.push({x,y});
+      }
+    }
+    fitLine();
+    selectedPoint = null;
+    p.print('generateData finished — points:', points.length);
+  }
+
+  function fitLine(){
+    const n = points.length;
+    const meanX = mean(points.map(pt=>pt.x));
+    const meanY = mean(points.map(pt=>pt.y));
+    let num=0, den=0;
+    for (const pt of points){ num += (pt.x-meanX)*(pt.y-meanY); den += (pt.x-meanX)*(pt.x-meanX); }
+    m = den===0 ? 0 : num/den;
+    b = meanY - m*meanX;
+    // R^2
+    const ssTot = points.reduce((a,pt)=>a+(pt.y-meanY)**2,0);
+    const ssRes = points.reduce((a,pt)=>a+(pt.y-(m*pt.x+b))**2,0);
+    r2 = ssTot===0 ? 0 : 1-ssRes/ssTot;
+  }
+
+  // ---------- math helpers ----------
+  const mean = arr => arr.reduce((a,b)=>a+b,0)/arr.length;
+  const median = arr => { const s=[...arr].sort((a,b)=>a-b); const n=s.length; return n%2? s[(n-1)/2] : (s[n/2-1]+s[n/2])/2; };
+  const variance = arr => { const mu=mean(arr); return arr.reduce((t,v)=>t+(v-mu)**2,0)/arr.length; };
+  function quantile(sortedArr, q){
+    // sortedArr must be sorted ascending
+    const pos = (sortedArr.length-1) * q;
+    const base = Math.floor(pos), rest = pos - base;
+    if (sortedArr[base+1] !== undefined) return sortedArr[base] + rest * (sortedArr[base+1]-sortedArr[base]);
+    return sortedArr[base];
+  }
+  function erf(x){ // Abramowitz–Stegun approximation
+    const s = Math.sign(x); x = Math.abs(x);
+    const t = 1/(1+0.3275911*x);
+    const y = 1 - (((((1.061405429*t - 1.453152027)*t) + 1.421413741)*t - 0.284496736)*t + 0.254829592)*t*Math.exp(-x*x);
+    return s*y;
+  }
+  const normalCDF = z => (1 + erf(z/Math.sqrt(2))) / 2;
+
+  // binned mode (for continuous values)
+  function binnedMode(values, bins=24){
+    if (values.length===0) return null;
+    const min = Math.min(...values), max = Math.max(...values);
+    if (min===max) return min;
+    const counts = new Array(bins).fill(0);
+    const step = (max-min)/bins;
+    values.forEach(v=>{
+      let idx = Math.floor((v-min)/step);
+      if (idx===bins) idx=bins-1;
+      counts[idx]++;
+    });
+    let best = 0, bi = 0;
+    for (let i=0;i<bins;i++){ if (counts[i]>best){ best=counts[i]; bi=i; } }
+    return min + (bi+0.5)*step; // center of the busiest bin
+  }
+
+  // projection of (x0,y0) onto y=m x + b, returns {xi, yi}
+  function projectToLine(x0,y0){
+    const xi = (x0 + m*(y0 - b)) / (1 + m*m);
+    return {xi, yi: m*xi + b};
+  }
+
+  // signed perpendicular residual of a point to the line (pixels)
+  const signedResidual = (x,y) => (y - (m*x + b)) / Math.sqrt(1+m*m);
+
+  // unit vectors (in pixels) along tangent (t) and perpendicular (n)
+  function basis(){
+    const norm = Math.sqrt(1+m*m) || 1;
+    const t = {x: 1/norm, y: m/norm};     // along the red line (rightwards)
+    const n = {x: -m/norm, y: 1/norm};    // perpendicular (up-left when m>0)
+    return {t, n};
+  }
+
+  // draw a global horizontal boxplot of Y at the bottom for context
+  function drawGlobalBoxplotY(){
+    const ys = points.map(pt=>pt.y).sort((a,b)=>a-b);
+    const minY = ys[0], maxY = ys[ys.length-1];
+    const q1 = quantile(ys,0.25), med = quantile(ys,0.5), q3 = quantile(ys,0.75);
+    const yBase = H - 40, left = 60, right = W - 60; // horizontal axis span
+    // scale x by value
+    const sx = v => p.map(v, minY, maxY, left, right);
+
+    // whiskers
+    p.stroke(50); p.strokeWeight(2); p.noFill();
+    p.line(sx(minY), yBase, sx(maxY), yBase);
+    // caps
+    p.line(sx(minY), yBase-8, sx(minY), yBase+8);
+    p.line(sx(maxY), yBase-8, sx(maxY), yBase+8);
+    // box
+    p.noStroke(); p.fill(160,120,220,140);
+    p.rect(sx(q1), yBase-12, sx(q3)-sx(q1), 24);
+    // median
+    p.stroke(220,40,40); p.strokeWeight(2);
+    p.line(sx(med), yBase-12, sx(med), yBase+12);
+
+    p.noStroke(); p.fill(0); p.textSize(12);
+    p.text('Global Y boxplot', left, yBase-18);
+  }
+
+  // draw perpendicular boxplot (with whiskers) and a density ridge "above" it (along t)
+  function drawPerpBoxAndRidge(xc, yc){
+    // collect local residuals from points with |x-xc| <= windowPixels
+    const locals = points.filter(pt => Math.abs(pt.x - xc) <= windowPixels);
+    if (locals.length < 5) return; // not enough
+
+    const resids = locals.map(pt => signedResidual(pt.x, pt.y)); // in pixels
+    const sorted = [...resids].sort((a,b)=>a-b);
+    const minV = sorted[0], maxV = sorted[sorted.length-1];
+    const q1 = quantile(sorted, 0.25);
+    const med = quantile(sorted, 0.50);
+    const q3 = quantile(sorted, 0.75);
+    const iqr = q3 - q1;
+    const mu = mean(resids);
+    const sd = Math.sqrt(variance(resids));
+    const v = sd*sd;
+    const cv = mu !== 0 ? sd/Math.abs(mu) : 0;
+    const mode = binnedMode(resids);
+
+    // if a specific point is selected, compute its residual and z
+    let z = 0, twoTail = 1, oneTail = 0.5;
+    if (selectedPoint){
+      const r = signedResidual(selectedPoint.x, selectedPoint.y);
+      z = sd>0 ? (r - mu)/sd : 0;
+      twoTail = 2 * (1 - normalCDF(Math.abs(z)));
+      oneTail = 1 - normalCDF(Math.abs(z));
+    }
+
+    // bases
+    const {t, n} = basis();
+
+    // helper to place a point offset by a * n + b * t (in pixels)
+    const P = (a, b) => ({ x: xc + a*n.x + b*t.x, y: yc + a*n.y + b*t.y });
+
+    // ----- density ridge (green) along +t direction -----
+    const sMin = -3*sd, sMax = 3*sd;
+    p.noStroke(); p.fill(60,160,100,160);
+    p.beginShape();
+    for (let i=0;i<=48;i++){
+      const u = i/48; const s = sMin + u*(sMax - sMin); // position along n
+      const pdf = sd>0 ? Math.exp(-0.5*((s-mu)/sd)**2) : 0; // unnormalized
+      const h = ridgeHeight * pdf; // height along +t
+      const pt = P(s, h);
+      p.vertex(pt.x, pt.y);
+    }
+    for (let i=48;i>=0;i--){
+      const u = i/48; const s = sMin + u*(sMax - sMin);
+      const pt = P(s, 0); // baseline on the line
+      p.vertex(pt.x, pt.y);
+    }
+    p.endShape(p.CLOSE);
+
+    // ----- box plot (purple) oriented along n (perpendicular) -----
+    // whiskers
+    p.stroke(120,70,170); p.strokeWeight(2); p.noFill();
+    const wMin = P(minV, 0), wMax = P(maxV, 0);
+    p.line(wMin.x, wMin.y, wMax.x, wMax.y);
+    // caps
+    const cap = boxWidth*0.6; // half-length of caps drawn along t
+    const capMinA = P(minV, -cap), capMinB = P(minV, cap);
+    const capMaxA = P(maxV, -cap), capMaxB = P(maxV, cap);
+    p.line(capMinA.x, capMinA.y, capMinB.x, capMinB.y);
+    p.line(capMaxA.x, capMaxA.y, capMaxB.x, capMaxB.y);
+
+    // box from q1 to q3 (draw as a quad offset along t by ±boxWidth/2)
+    const halfW = boxWidth/2;
+    const q1L = P(q1, -halfW), q1R = P(q1, halfW);
+    const q3L = P(q3, -halfW), q3R = P(q3, halfW);
+    p.noStroke(); p.fill(160,120,220,150);
+    p.beginShape();
+      p.vertex(q1L.x, q1L.y);
+      p.vertex(q1R.x, q1R.y);
+      p.vertex(q3R.x, q3R.y);
+      p.vertex(q3L.x, q3L.y);
+    p.endShape(p.CLOSE);
+
+    // median line inside box
+    p.stroke(255,60,60); p.strokeWeight(2);
+    const medA = P(med, -halfW), medB = P(med, halfW);
+    p.line(medA.x, medA.y, medB.x, medB.y);
+
+    // annotation
+    p.noStroke(); p.fill(0); p.textSize(11);
+    const label = `local n=${locals.length}\nμ=${mu.toFixed(2)}  σ=${sd.toFixed(2)}  Var=${v.toFixed(2)}\nQ1=${q1.toFixed(2)}  Med=${med.toFixed(2)}  Q3=${q3.toFixed(2)}  IQR=${iqr.toFixed(2)}\nMode≈${mode!==null?mode.toFixed(2):'—'}  CV=${cv.toFixed(3)}\nZ=${z.toFixed(3)}  p₂≈${twoTail.toFixed(4)}  p₁≈${oneTail.toFixed(4)}`;
+    const textPos = P(maxV + 18, boxWidth*1.2);
+    p.text(label, textPos.x, textPos.y);
+  }
+
+  // ---------- drawing ----------
+  p.draw = () => {
+    p.background(255);
+
+    // scatter
+    p.noStroke(); p.fill(30,90,200,150);
+    for (const pt of points) p.ellipse(pt.x, pt.y, 6, 6);
+
+    // regression line (red)
+    p.stroke(220,40,40); p.strokeWeight(2);
+    p.line(0, b, W, m*W + b);
+
+    // selected point visuals & local box/ridge
+    if (selectedPoint){
+      const {xi, yi} = projectToLine(selectedPoint.x, selectedPoint.y);
+      // draw a small normal line segment (perpendicular guide)
+      const {n} = basis();
+      p.stroke(0,120); p.strokeWeight(1.2);
+      p.line(xi - 80*n.x, yi - 80*n.y, xi + 80*n.x, yi + 80*n.y);
+
+      // highlight projection point
+      p.noStroke(); p.fill(0);
+      p.ellipse(xi, yi, 5, 5);
+
+      // draw the sideways box+ridge at the projection
+      drawPerpBoxAndRidge(xi, yi);
+    }
+
+    // Global bottom boxplot of Y
+    drawGlobalBoxplotY();
+
+    // R^2 display
+    p.noStroke(); p.fill(0); p.textSize(14);
+    p.text(`R² = ${r2.toFixed(3)}`, W - 120, H - 20);
+
+    // hint
+    p.textSize(12); p.fill(60);
+    p.text('Click a point → drag along the regression line to see local perpendicular distribution & boxplot. Press R to regenerate.', 12, 18);
+  };
+
+  // ---------- interaction ----------
+  p.mousePressed = () => {
+    // pick the closest point under cursor
+    for (const pt of points){
+      if (p.dist(p.mouseX, p.mouseY, pt.x, pt.y) < 7){ selectedPoint = pt; dragging = true; return; }
+    }
+    selectedPoint = null;
+  };
+
+  p.mouseDragged = () => {
+    if (!dragging || !selectedPoint) return;
+    // move the selected point ALONG the red line: keep it at the perpendicular projection of mouse
+    const {xi, yi} = projectToLine(p.mouseX, p.mouseY);
+    selectedPoint.x = xi; selectedPoint.y = yi;
+    // (Optionally you could re-fit line as you drag; we keep global fit fixed for clarity)
+  };
+
+  p.mouseReleased = () => { dragging = false; };
+
+  p.keyPressed = () => { if (p.key==='R' || p.key==='r') generateData(); };
+};
+
+new p5(sketch);
+
+
+
+
+
+
+
+
+
+********************************
+/*
+Interactive p5.js (instance mode)
+— Scatter + regression (red)
+— Click a point → shows a **sideways (perpendicular) boxplot with whiskers** centered on the regression line at that point
+— Above the box (along the red line direction) it draws a smooth normal-shaped ridge of the local residual distribution
+— Drag the selected point and it will slide **on the red line**, updating stats live
+— Detailed local stats (mean, median, mode, variance, sd, IQR, CV, z, p-values) shown near the box
+— Global boxplot of Y (response) shown at the bottom for context
+
+Keys: R to regenerate data
+*/
+
+let sketch = (p) => {
+  // data & fit
+  let points = [];
+  let m = 0.5, b = 0, r2 = 0;
+  const N = 260;
+
+  // interaction
+  let selectedPoint = null;
+  let dragging = false;
+
+  // layout (canvas coords are data units)
+  const W = 900, H = 640;
+
+  // local window for estimating residual distribution around the selected x
+  const windowPixels = 120;     // points whose x is within this of the projection will be used
+  const ridgeHeight = 36;       // pixels: peak height of the green density ridge
+  const boxWidth = 24;          // visual thickness of the box (drawn along tangent)
+
+  p.setup = () => {
+    p.createCanvas(W, H);
+    generateData();
+  };
+
+  function generateData(){
+    points = [];
+    // 3 loose clusters around an underlying trend
+    const clusters = [
+      {cx: 140, sx: 60, dy: -35, n: 80},
+      {cx: 360, sx: 50, dy:  20, n: 120},
+      {cx: 650, sx: 70, dy:  10, n: 60}
+    ];
+    const trueSlope = 0.9, trueIntercept = 120;
+    for (const cl of clusters){
+      for (let i=0;i<cl.n;i++){
+        const x = p.randomGaussian(cl.cx, cl.sx);
+        const y = trueSlope * x + trueIntercept + cl.dy + p.randomGaussian(0, 12);
+        points.push({x,y});
+      }
+    }
+    fitLine();
+    selectedPoint = null;
+    p.print('generateData finished — points:', points.length);
+  }
+
+  function fitLine(){
+    const n = points.length;
+    const meanX = mean(points.map(pt=>pt.x));
+    const meanY = mean(points.map(pt=>pt.y));
+    let num=0, den=0;
+    for (const pt of points){ num += (pt.x-meanX)*(pt.y-meanY); den += (pt.x-meanX)*(pt.x-meanX); }
+    m = den===0 ? 0 : num/den;
+    b = meanY - m*meanX;
+    // R^2
+    const ssTot = points.reduce((a,pt)=>a+(pt.y-meanY)**2,0);
+    const ssRes = points.reduce((a,pt)=>a+(pt.y-(m*pt.x+b))**2,0);
+    r2 = ssTot===0 ? 0 : 1-ssRes/ssTot;
+  }
+
+  // ---------- math helpers ----------
+  const mean = arr => arr.reduce((a,b)=>a+b,0)/arr.length;
+  const median = arr => { const s=[...arr].sort((a,b)=>a-b); const n=s.length; return n%2? s[(n-1)/2] : (s[n/2-1]+s[n/2])/2; };
+  const variance = arr => { const mu=mean(arr); return arr.reduce((t,v)=>t+(v-mu)**2,0)/arr.length; };
+  function quantile(sortedArr, q){
+    // sortedArr must be sorted ascending
+    const pos = (sortedArr.length-1) * q;
+    const base = Math.floor(pos), rest = pos - base;
+    if (sortedArr[base+1] !== undefined) return sortedArr[base] + rest * (sortedArr[base+1]-sortedArr[base]);
+    return sortedArr[base];
+  }
+  function erf(x){ // Abramowitz–Stegun approximation
+    const s = Math.sign(x); x = Math.abs(x);
+    const t = 1/(1+0.3275911*x);
+    const y = 1 - (((((1.061405429*t - 1.453152027)*t) + 1.421413741)*t - 0.284496736)*t + 0.254829592)*t*Math.exp(-x*x);
+    return s*y;
+  }
+  const normalCDF = z => (1 + erf(z/Math.sqrt(2))) / 2;
+
+  // binned mode (for continuous values)
+  function binnedMode(values, bins=24){
+    if (values.length===0) return null;
+    const min = Math.min(...values), max = Math.max(...values);
+    if (min===max) return min;
+    const counts = new Array(bins).fill(0);
+    const step = (max-min)/bins;
+    values.forEach(v=>{
+      let idx = Math.floor((v-min)/step);
+      if (idx===bins) idx=bins-1;
+      counts[idx]++;
+    });
+    let best = 0, bi = 0;
+    for (let i=0;i<bins;i++){ if (counts[i]>best){ best=counts[i]; bi=i; } }
+    return min + (bi+0.5)*step; // center of the busiest bin
+  }
+
+  // projection of (x0,y0) onto y=m x + b, returns {xi, yi}
+  function projectToLine(x0,y0){
+    const xi = (x0 + m*(y0 - b)) / (1 + m*m);
+    return {xi, yi: m*xi + b};
+  }
+
+  // signed perpendicular residual of a point to the line (pixels)
+  const signedResidual = (x,y) => (y - (m*x + b)) / Math.sqrt(1+m*m);
+
+  // unit vectors (in pixels) along tangent (t) and perpendicular (n)
+  function basis(){
+    const norm = Math.sqrt(1+m*m) || 1;
+    const t = {x: 1/norm, y: m/norm};     // along the red line (rightwards)
+    const n = {x: -m/norm, y: 1/norm};    // perpendicular (up-left when m>0)
+    return {t, n};
+  }
+
+  // draw a global horizontal boxplot of Y at the bottom for context
+  function drawGlobalBoxplotY(){
+    const ys = points.map(pt=>pt.y).sort((a,b)=>a-b);
+    const minY = ys[0], maxY = ys[ys.length-1];
+    const q1 = quantile(ys,0.25), med = quantile(ys,0.5), q3 = quantile(ys,0.75);
+    const yBase = H - 40, left = 60, right = W - 60; // horizontal axis span
+    // scale x by value
+    const sx = v => p.map(v, minY, maxY, left, right);
+
+    // whiskers
+    p.stroke(50); p.strokeWeight(2); p.noFill();
+    p.line(sx(minY), yBase, sx(maxY), yBase);
+    // caps
+    p.line(sx(minY), yBase-8, sx(minY), yBase+8);
+    p.line(sx(maxY), yBase-8, sx(maxY), yBase+8);
+    // box
+    p.noStroke(); p.fill(160,120,220,140);
+    p.rect(sx(q1), yBase-12, sx(q3)-sx(q1), 24);
+    // median
+    p.stroke(220,40,40); p.strokeWeight(2);
+    p.line(sx(med), yBase-12, sx(med), yBase+12);
+
+    p.noStroke(); p.fill(0); p.textSize(12);
+    p.text('Global Y boxplot', left, yBase-18);
+  }
+
+  // draw perpendicular boxplot (with whiskers) and a density ridge "above" it (along t)
+  function drawPerpBoxAndRidge(xc, yc){
+    // collect local residuals from points with |x-xc| <= windowPixels
+    const locals = points.filter(pt => Math.abs(pt.x - xc) <= windowPixels);
+    if (locals.length < 5) return; // not enough
+
+    const resids = locals.map(pt => signedResidual(pt.x, pt.y)); // in pixels
+    const sorted = [...resids].sort((a,b)=>a-b);
+    const minV = sorted[0], maxV = sorted[sorted.length-1];
+    const q1 = quantile(sorted, 0.25);
+    const med = quantile(sorted, 0.50);
+    const q3 = quantile(sorted, 0.75);
+    const iqr = q3 - q1;
+    const mu = mean(resids);
+    const sd = Math.sqrt(variance(resids));
+    const v = sd*sd;
+    const cv = mu !== 0 ? sd/Math.abs(mu) : 0;
+    const mode = binnedMode(resids);
+
+    // if a specific point is selected, compute its residual and z
+    let z = 0, twoTail = 1, oneTail = 0.5;
+    if (selectedPoint){
+      const r = signedResidual(selectedPoint.x, selectedPoint.y);
+      z = sd>0 ? (r - mu)/sd : 0;
+      twoTail = 2 * (1 - normalCDF(Math.abs(z)));
+      oneTail = 1 - normalCDF(Math.abs(z));
+    }
+
+    // bases
+    const {t, n} = basis();
+
+    // helper to place a point offset by a * n + b * t (in pixels)
+    const P = (a, b) => ({ x: xc + a*n.x + b*t.x, y: yc + a*n.y + b*t.y });
+
+    // ----- density ridge (green) along +t direction -----
+    const sMin = -3*sd, sMax = 3*sd;
+    p.noStroke(); p.fill(60,160,100,160);
+    p.beginShape();
+    for (let i=0;i<=48;i++){
+      const u = i/48; const s = sMin + u*(sMax - sMin); // position along n
+      const pdf = sd>0 ? Math.exp(-0.5*((s-mu)/sd)**2) : 0; // unnormalized
+      const h = ridgeHeight * pdf; // height along +t
+      const pt = P(s, h);
+      p.vertex(pt.x, pt.y);
+    }
+    for (let i=48;i>=0;i--){
+      const u = i/48; const s = sMin + u*(sMax - sMin);
+      const pt = P(s, 0); // baseline on the line
+      p.vertex(pt.x, pt.y);
+    }
+    p.endShape(p.CLOSE);
+
+    // ----- box plot (purple) oriented along n (perpendicular) -----
+    // whiskers
+    p.stroke(120,70,170); p.strokeWeight(2); p.noFill();
+    const wMin = P(minV, 0), wMax = P(maxV, 0);
+    p.line(wMin.x, wMin.y, wMax.x, wMax.y);
+    // caps
+    const cap = boxWidth*0.6; // half-length of caps drawn along t
+    const capMinA = P(minV, -cap), capMinB = P(minV, cap);
+    const capMaxA = P(maxV, -cap), capMaxB = P(maxV, cap);
+    p.line(capMinA.x, capMinA.y, capMinB.x, capMinB.y);
+    p.line(capMaxA.x, capMaxA.y, capMaxB.x, capMaxB.y);
+
+    // box from q1 to q3 (draw as a quad offset along t by ±boxWidth/2)
+    const halfW = boxWidth/2;
+    const q1L = P(q1, -halfW), q1R = P(q1, halfW);
+    const q3L = P(q3, -halfW), q3R = P(q3, halfW);
+    p.noStroke(); p.fill(160,120,220,150);
+    p.beginShape();
+      p.vertex(q1L.x, q1L.y);
+      p.vertex(q1R.x, q1R.y);
+      p.vertex(q3R.x, q3R.y);
+      p.vertex(q3L.x, q3L.y);
+    p.endShape(p.CLOSE);
+
+    // median line inside box
+    p.stroke(255,60,60); p.strokeWeight(2);
+    const medA = P(med, -halfW), medB = P(med, halfW);
+    p.line(medA.x, medA.y, medB.x, medB.y);
+
+    // annotation
+    p.noStroke(); p.fill(0); p.textSize(11);
+    const label = `local n=${locals.length}\nμ=${mu.toFixed(2)}  σ=${sd.toFixed(2)}  Var=${v.toFixed(2)}\nQ1=${q1.toFixed(2)}  Med=${med.toFixed(2)}  Q3=${q3.toFixed(2)}  IQR=${iqr.toFixed(2)}\nMode≈${mode!==null?mode.toFixed(2):'—'}  CV=${cv.toFixed(3)}\nZ=${z.toFixed(3)}  p₂≈${twoTail.toFixed(4)}  p₁≈${oneTail.toFixed(4)}`;
+    const textPos = P(maxV + 18, boxWidth*1.2);
+    p.text(label, textPos.x, textPos.y);
+  }
+
+  // ---------- drawing ----------
+  p.draw = () => {
+    p.background(255);
+
+    // scatter
+    p.noStroke(); p.fill(30,90,200,150);
+    for (const pt of points) p.ellipse(pt.x, pt.y, 6, 6);
+
+    // regression line (red)
+    p.stroke(220,40,40); p.strokeWeight(2);
+    p.line(0, b, W, m*W + b);
+
+    // selected point visuals & local box/ridge
+    if (selectedPoint){
+      const {xi, yi} = projectToLine(selectedPoint.x, selectedPoint.y);
+      // draw a small normal line segment (perpendicular guide)
+      const {n} = basis();
+      p.stroke(0,120); p.strokeWeight(1.2);
+      p.line(xi - 80*n.x, yi - 80*n.y, xi + 80*n.x, yi + 80*n.y);
+
+      // highlight projection point
+      p.noStroke(); p.fill(0);
+      p.ellipse(xi, yi, 5, 5);
+
+      // draw the sideways box+ridge at the projection
+      drawPerpBoxAndRidge(xi, yi);
+    }
+
+    // Global bottom boxplot of Y
+    drawGlobalBoxplotY();
+
+    // R^2 display
+    p.noStroke(); p.fill(0); p.textSize(14);
+    p.text(`R² = ${r2.toFixed(3)}`, W - 120, H - 20);
+
+    // hint
+    p.textSize(12); p.fill(60);
+    p.text('Click a point → drag along the regression line to see local perpendicular distribution & boxplot. Press R to regenerate.', 12, 18);
+  };
+
+  // ---------- interaction ----------
+  p.mousePressed = () => {
+    // pick the closest point under cursor
+    for (const pt of points){
+      if (p.dist(p.mouseX, p.mouseY, pt.x, pt.y) < 7){ selectedPoint = pt; dragging = true; return; }
+    }
+    selectedPoint = null;
+  };
+
+  p.mouseDragged = () => {
+    if (!dragging || !selectedPoint) return;
+    // move the selected point ALONG the red line: keep it at the perpendicular projection of mouse
+    const {xi, yi} = projectToLine(p.mouseX, p.mouseY);
+    selectedPoint.x = xi; selectedPoint.y = yi;
+    // (Optionally you could re-fit line as you drag; we keep global fit fixed for clarity)
+  };
+
+  p.mouseReleased = () => { dragging = false; };
+
+  p.keyPressed = () => { if (p.key==='R' || p.key==='r') generateData(); };
+};
+
+new p5(sketch);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
