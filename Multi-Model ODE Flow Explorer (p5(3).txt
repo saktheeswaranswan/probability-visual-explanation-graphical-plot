@@ -1,0 +1,590 @@
+// Multi-Model ODE / Flow Explorer (p5.js, instance mode)
+// - Double Gyre (2D time-dependent flow) -> weather/transport analog
+// - Pulsatile Vortex (blood-like rotating/pulsing flow) -> streamline demo
+// - Duffing oscillator (bifurcation / pert. sensitivity)
+// - Lorenz system (3D chaotic "butterfly effect")
+// - Click to spawn tracers; displays local normal curve of local speeds
+// - Shows ODE equations and parameters on-screen
+// - Perturbation toggle shows divergence of nearby initial conditions
+//
+// Paste into p5 editor and run.
+
+let sketch = (p) => {
+  // UI + models
+  let models = {};
+  let currentModel;
+  let modelSelector;
+  let noiseSlider, speedSlider, playPauseButton, perturbButton, clearButton;
+  let autoPlay = true, t = 0, dt_global = 0.01;
+
+  // tracers
+  let tracers = [];
+  let tracersTwin = []; // clones for perturbation comparison
+  let showVectors = true;
+  let showDensityOnClick = true;
+
+  // helper: RK4 integrator for vector fields (2D) and for 3D Lorenz
+  function rk42D(xy, t, dt, fieldFunc) {
+    // xy: {x,y}
+    let k1 = fieldFunc(xy.x, xy.y, t);
+    let k2p = fieldFunc(xy.x + 0.5 * dt * k1.vx, xy.y + 0.5 * dt * k1.vy, t + 0.5 * dt);
+    let k3p = fieldFunc(xy.x + 0.5 * dt * k2p.vx, xy.y + 0.5 * dt * k2p.vy, t + 0.5 * dt);
+    let k4p = fieldFunc(xy.x + dt * k3p.vx, xy.y + dt * k3p.vy, t + dt);
+    let nx = xy.x + (dt / 6) * (k1.vx + 2 * k2p.vx + 2 * k3p.vx + k4p.vx);
+    let ny = xy.y + (dt / 6) * (k1.vy + 2 * k2p.vy + 2 * k3p.vy + k4p.vy);
+    return { x: nx, y: ny };
+  }
+
+  function rk43D(state, t, dt, fieldFunc) {
+    // state: {x,y,z}
+    function add(s, k, scalar) { return { x: s.x + scalar * k.x, y: s.y + scalar * k.y, z: s.z + scalar * k.z }; }
+    let k1 = fieldFunc(state.x, state.y, state.z, t);
+    let k2 = fieldFunc(state.x + 0.5 * dt * k1.x, state.y + 0.5 * dt * k1.y, state.z + 0.5 * dt * k1.z, t + 0.5 * dt);
+    let k3 = fieldFunc(state.x + 0.5 * dt * k2.x, state.y + 0.5 * dt * k2.y, state.z + 0.5 * dt * k2.z, t + 0.5 * dt);
+    let k4 = fieldFunc(state.x + dt * k3.x, state.y + dt * k3.y, state.z + dt * k3.z, t + dt);
+    return {
+      x: state.x + (dt / 6) * (k1.x + 2 * k2.x + 2 * k3.x + k4.x),
+      y: state.y + (dt / 6) * (k1.y + 2 * k2.y + 2 * k3.y + k4.y),
+      z: state.z + (dt / 6) * (k1.z + 2 * k2.z + 2 * k3.z + k4.z)
+    };
+  }
+
+  // --- Base Model class ---
+  class FlowModel {
+    constructor(name) {
+      this.name = name;
+      this.params = {}; // user-changeable coefficients
+      this.infoLines = []; // strings to display ODE
+    }
+    // For 2D models: vector field function (x,y,t) -> {vx, vy}
+    vectorField(x, y, t) { return { vx: 0, vy: 0 }; }
+    // For 3D models: ode(x,y,z,t) -> {xDot,yDot,zDot}
+    ode3(x, y, z, t) { return { x: 0, y: 0, z: 0 }; }
+    reset() {}
+  }
+
+  // --- Double Gyre (useful for Lagrangian transport / weather analog) ---
+  class DoubleGyre extends FlowModel {
+    constructor() {
+      super("Double Gyre (2D time-dependent)");
+      // default parameters
+      this.params.A = 0.1;    // amplitude
+      this.params.eps = 0.25; // perturbation amplitude (time-dependent)
+      this.params.omega = 2 * Math.PI / 10; // frequency
+      this.infoLines = [
+        "Stream function: ψ(x,y,t) = A*sin(pi*f(x,t))*sin(pi*y)",
+        "f(x,t) = a(t)*x^2 + b(t)*x, with a,b depend on eps*cos(omega*t)",
+        "Velocity: u = ∂ψ/∂y, v = -∂ψ/∂x"
+      ];
+    }
+    f(x, t) {
+      let eps = this.params.eps, omega = this.params.omega;
+      let a = eps * Math.sin(omega * t);
+      // scale x into [0,1] domain used in classic double-gyre formulation
+      // We'll treat canvas x in [60, width-220] mapped to [0,2].
+      return a * x * x + (1 - 2 * a) * x;
+    }
+    // x,y are in normalized domain [0..2] for convenience
+    vectorField(canvasX, canvasY, t) {
+      // map canvas coords to normalized domain
+      let xmin = 60, xmax = p.width - 220;
+      let ymin = 40, ymax = p.height - 20;
+      let x = p.map(canvasX, xmin, xmax, 0, 2); // domain [0,2]
+      let y = p.map(canvasY, ymin, ymax, 0, 1); // domain [0,1]
+      let A = this.params.A, eps = this.params.eps, omega = this.params.omega;
+      let a = eps * Math.sin(omega * t);
+      let f = a * x * x + (1 - 2 * a) * x;
+      let df_dx = 2 * a * x + (1 - 2 * a);
+      // streamfunction psi = A * sin(pi * f(x,t)) * sin(pi * y)
+      let psi = A * Math.sin(Math.PI * f) * Math.sin(Math.PI * y);
+      // velocities in normalized domain:
+      // u = dψ/dy = A * sin(pi*f) * pi * cos(pi*y)
+      // v = -dψ/dx = -A * pi * cos(pi*f) * df_dx * sin(pi*y)
+      let u = A * Math.sin(Math.PI * f) * Math.PI * Math.cos(Math.PI * y);
+      let v = -A * Math.PI * Math.cos(Math.PI * f) * df_dx * Math.sin(Math.PI * y);
+
+      // map back to canvas "pixels per second" scale
+      // scale factors:
+      let sx = (xmax - xmin) / 2; // normalized x scale
+      let sy = (ymax - ymin) / 1; // normalized y scale
+      // convert normalized velocities to pixel velocities:
+      let vx = u * sx;
+      let vy = -v * sy; // negative because canvas y grows downward
+
+      return { vx: vx, vy: vy, info: `A=${A.toFixed(3)} eps=${eps.toFixed(3)} ω=${omega.toFixed(3)}` };
+    }
+  }
+
+  // --- Pulsatile Vortex (blood-flow-like simplified) ---
+  class PulsatileVortex extends FlowModel {
+    constructor() {
+      super("Pulsatile Vortex (2D, blood flow analog)");
+      this.params.centerX = 400;
+      this.params.centerY = 300;
+      this.params.strength = 3000; // circulation magnitude
+      this.params.freq = 2 * Math.PI / 2.0; // pulses per seconds
+      this.params.decay = 200; // radial decay scale
+      this.infoLines = [
+        "Velocity (r-based vortex): u_theta = Γ(t)/(2πr) * exp(-r/decay)",
+        "Γ(t) = strength * (1 + 0.6*sin(freq*t)) (pulsatile)"
+      ];
+    }
+    vectorField(cx, cy, t) {
+      let cx0 = this.params.centerX, cy0 = this.params.centerY;
+      let dx = cx - cx0, dy = cy - cy0;
+      let r = Math.sqrt(dx * dx + dy * dy) + 1e-6;
+      let Γ = this.params.strength * (1 + 0.6 * Math.sin(this.params.freq * t));
+      // tangential velocity magnitude
+      let ut = (Γ / (2 * Math.PI * r)) * Math.exp(-r / this.params.decay);
+      // direction tangential: (-dy/r, dx/r)
+      let vx = -dy / r * ut;
+      let vy = dx / r * ut;
+      return { vx: vx, vy: vy, info: `Γ(t)≈${Γ.toFixed(1)} r=${r.toFixed(1)}` };
+    }
+  }
+
+  // --- Duffing oscillator (bifurcation / chaotic routes) ---
+  // x' = y
+  // y' = x - x^3 - δ y + γ cos(ω t)
+  class Duffing extends FlowModel {
+    constructor() {
+      super("Duffing Oscillator (1D nonlinear, bifurcation demo)");
+      this.params.delta = 0.2; // damping
+      this.params.gamma = 8.5; // forcing amplitude (bifurcation sensitive)
+      this.params.omega = 1.0;
+      this.infoLines = [
+        "Duffing: x' = y",
+        "y' = x - x^3 - δ y + γ cos(ω t)",
+        "Vary γ or δ to observe periodic -> chaotic transitions"
+      ];
+      this.state = { x: 0.2, y: 0 };
+    }
+    // we provide a pseudo-vector-field representation by embedding (x,y) to 2D canvas coords
+    vectorField(cx, cy, t) {
+      // This model is not a spatial flow; instead we'll interpret cx,cy as state variables:
+      // But for seeding/tracing, we'll display a phase-plane field anchored in a box
+      // Map canvas cx->x in [-2,2], cy->y in [-5,5]
+      let xmin = 60, xmax = p.width - 220;
+      let ymin = 40, ymax = p.height - 20;
+      let x = p.map(cx, xmin, xmax, -2, 2);
+      let y = p.map(cy, ymin, ymax, -5, 5);
+      let xdot = y;
+      let ydot = x - x * x * x - this.params.delta * y + this.params.gamma * Math.cos(this.params.omega * t);
+      // map back to pixel velocities (scaled)
+      let vx = mapToPixels(xdot, xmin, xmax, -6, 6);
+      let vy = mapToPixels(-ydot, ymin, ymax, -12, 12);
+      return { vx, vy, info: `δ=${this.params.delta.toFixed(2)} γ=${this.params.gamma.toFixed(2)} ω=${this.params.omega.toFixed(2)}` };
+    }
+  }
+
+  // --- Lorenz system (3D, chaotic, butterfly effect) ---
+  // x' = σ(y - x)
+  // y' = x(ρ - z) - y
+  // z' = x y - β z
+  class Lorenz extends FlowModel {
+    constructor() {
+      super("Lorenz System (3D chaotic)");
+      this.params.sigma = 10.0;
+      this.params.rho = 28.0;
+      this.params.beta = 8.0 / 3.0;
+      this.infoLines = [
+        "Lorenz: x' = σ(y - x)",
+        "y' = x(ρ - z) - y",
+        "z' = x y - β z",
+        "Classic chaotic parameters: σ=10, ρ=28, β=8/3"
+      ];
+      this.trajectory = []; // collection of points to render attractor
+      this.state = { x: 0.1, y: 0.0, z: 0.0 };
+    }
+    reset() {
+      this.trajectory = [];
+      this.state = { x: 0.1 + Math.random() * 0.01, y: 0.0, z: 0.0 };
+    }
+    ode3(x, y, z, t) {
+      let s = this.params.sigma, r = this.params.rho, b = this.params.beta;
+      return { x: s * (y - x), y: x * (r - z) - y, z: x * y - b * z };
+    }
+  }
+
+  // --- Utility helpers ---
+  function mapToPixels(val, xmin, xmax, outMin, outMax) {
+    // map val in [-range,range] to pixel speeds approximate
+    // here we simply scale val to outMin..outMax range
+    let v = p.map(val, -10, 10, outMin, outMax);
+    return v;
+  }
+
+  // --- Tracer object ---
+  class Tracer2D {
+    constructor(x, y, color = null) {
+      this.x = x; this.y = y;
+      this.path = [{ x: x, y: y }];
+      this.age = 0;
+      this.color = color || p.color(Math.random() * 255, Math.random() * 255, Math.random() * 255, 200);
+    }
+    step(dt, fieldFunc) {
+      // integrate by small steps (RK4)
+      let res = rk42D({ x: this.x, y: this.y }, t, dt, fieldFunc);
+      this.x = res.x; this.y = res.y;
+      this.path.push({ x: this.x, y: this.y });
+      if (this.path.length > 500) this.path.shift();
+      this.age += dt;
+    }
+    draw() {
+      p.noFill();
+      p.stroke(this.color);
+      p.beginShape();
+      for (let pnt of this.path) p.vertex(pnt.x, pnt.y);
+      p.endShape();
+      // head
+      p.noStroke(); p.fill(this.color);
+      p.ellipse(this.x, this.y, 6, 6);
+    }
+  }
+
+  class Tracer3D {
+    constructor(x, y, z, color = null) {
+      this.state = { x, y, z };
+      this.path = [{ ...this.state }];
+      this.color = color || p.color(220, 120, 40, 200);
+    }
+    step(dt, ode3) {
+      let next = rk43D(this.state, t, dt, ode3);
+      this.state = next;
+      this.path.push({ ...this.state });
+      if (this.path.length > 800) this.path.shift();
+    }
+    draw(view) {
+      // view: {camAngleX, camAngleY, scale, cx, cy}
+      p.noFill(); p.stroke(this.color);
+      p.beginShape();
+      for (let s of this.path) {
+        let proj = project3D(s.x, s.y, s.z, view);
+        p.vertex(proj.x, proj.y);
+      }
+      p.endShape();
+      let head = project3D(this.state.x, this.state.y, this.state.z, view);
+      p.noStroke(); p.fill(this.color);
+      p.ellipse(head.x, head.y, 6, 6);
+    }
+  }
+
+  function project3D(x, y, z, view) {
+    // simple rotation + orthographic-ish projection for visualization
+    let rx = x * Math.cos(view.ang) - z * Math.sin(view.ang);
+    let rz = x * Math.sin(view.ang) + z * Math.cos(view.ang);
+    let scale = view.scale;
+    return { x: view.cx + rx * scale, y: view.cy - y * scale * 0.6 - rz * 0.1 };
+  }
+
+  // --- UI & setup ---
+  p.setup = () => {
+    p.createCanvas(1100, 700);
+    p.pixelDensity(1);
+    p.textSize(12);
+
+    // create model objects
+    models["Double Gyre"] = new DoubleGyre();
+    models["Pulsatile Vortex"] = new PulsatileVortex();
+    models["Duffing"] = new Duffing();
+    models["Lorenz"] = new Lorenz();
+
+    // selector
+    modelSelector = p.createSelect().position(10, 6);
+    Object.keys(models).forEach(name => modelSelector.option(name));
+    modelSelector.changed(() => {
+      const val = modelSelector.value();
+      currentModel = models[val];
+      if (currentModel.reset) currentModel.reset();
+      tracers = []; tracersTwin = [];
+    });
+    modelSelector.value("Double Gyre");
+    currentModel = models[modelSelector.value()];
+
+    // noise (perturbation) slider (affects strength slightly)
+    noiseSlider = p.createSlider(0, 100, 0, 1).position(200, 6).style('width', '120px');
+    p.createSpan('Perturbation %').position(320, 6);
+
+    // speed slider
+    speedSlider = p.createSlider(0, 200, 100, 1).position(420, 6).style('width', '120px');
+    p.createSpan('Speed').position(550, 6);
+
+    // play/pause
+    playPauseButton = p.createButton('Pause').position(650, 4);
+    playPauseButton.mousePressed(() => { autoPlay = !autoPlay; playPauseButton.html(autoPlay ? 'Pause' : 'Play'); });
+
+    // perturbation toggle (spawn twin tracer)
+    perturbButton = p.createButton('Perturb Toggle').position(710, 4);
+    perturbButton.mousePressed(() => {
+      // when toggled, spawn twin tracers near each existing tracer to demonstrate divergence
+      if (tracersTwin.length > 0) {
+        tracersTwin = [];
+      } else {
+        tracersTwin = tracers.map(tr => {
+          let jit = 1.0 + (Math.random() - 0.5) * 0.01; // tiny perturbation
+          let twin = new Tracer2D(tr.x + (Math.random() - 0.5) * 2, tr.y + (Math.random() - 0.5) * 2, p.color(255, 80, 80, 150));
+          return twin;
+        });
+      }
+    });
+
+    clearButton = p.createButton('Clear Tracers').position(820, 4);
+    clearButton.mousePressed(() => { tracers = []; tracersTwin = []; if (currentModel.reset) currentModel.reset(); });
+
+    p.createSpan(' Click canvas to spawn tracer & show local normal curve ').position(900, 6);
+  };
+
+  // --- draw loop ---
+  p.draw = () => {
+    p.background(252);
+
+    // update global time step based on speed slider
+    let speedFactor = speedSlider.value() / 100.0;
+    dt_global = 0.02 * speedFactor;
+    if (!autoPlay) dt_global = 0;
+
+    // draw domain box and vector field if 2D model
+    if (currentModel instanceof Lorenz) {
+      // render 3D Lorenz attractor view + controls
+      drawLorenzView();
+    } else {
+      // 2D field rendering
+      drawField2D();
+    }
+
+    // step and draw tracers
+    // step main tracers
+    for (let tr of tracers) {
+      // choose field func wrapper for current model
+      if (currentModel instanceof Lorenz) {
+        // ignore: Lorenz uses 3D; tracers are 2D in other mode
+      } else {
+        tr.step(Math.max(0.002, dt_global), (x, y, tnow) => currentModel.vectorField(x, y, tnow));
+      }
+    }
+
+    // step twin tracers for perturbation (slightly different parameters)
+    if (tracersTwin.length > 0) {
+      for (let i = 0; i < tracersTwin.length; i++) {
+        let twin = tracersTwin[i];
+        twin.step(Math.max(0.002, dt_global), (x, y, tnow) => currentModel.vectorField(x, y, tnow));
+      }
+    }
+
+    // draw tracers on top
+    for (let tr of tracers) tr.draw();
+    for (let tr of tracersTwin) tr.draw();
+
+    // display equations and parameters
+    p.fill(20); p.noStroke();
+    p.textAlign(p.LEFT, p.TOP);
+    p.textSize(14);
+    p.text(`Model: ${currentModel.name}`, 10, 30);
+    p.textSize(12);
+    let yline = 52;
+    for (let line of currentModel.infoLines) {
+      p.text(line, 10, yline); yline += 16;
+    }
+    // show parameters
+    yline += 4;
+    for (let k of Object.keys(currentModel.params)) {
+      p.text(`${k} = ${currentModel.params[k]}`, 10, yline);
+      yline += 14;
+    }
+
+    // show perturbation percent
+    p.text(`Perturbation slider: ${noiseSlider.value()}%`, 200, 26);
+
+    // if perturbation mode on (twins exist), compute and display mean divergence
+    if (tracersTwin.length > 0 && tracersTwin.length === tracers.length && tracers.length > 0) {
+      let sumd = 0;
+      for (let i = 0; i < tracers.length; i++) {
+        let a = tracers[i], b = tracersTwin[i];
+        let d = Math.hypot(a.x - b.x, a.y - b.y);
+        sumd += d;
+      }
+      let meanD = sumd / tracers.length;
+      p.fill(160, 0, 0);
+      p.text(`Mean divergence (pixels): ${meanD.toFixed(3)}`, 10, p.height - 24);
+    }
+  };
+
+  // --- draw helpers ---
+  function drawField2D() {
+    // draw domain rectangle
+    p.noFill(); p.stroke(180); p.rect(60, 40, p.width - 280, p.height - 60);
+
+    // draw vector arrows grid
+    if (showVectors) {
+      let spacing = 28;
+      for (let x = 60; x < p.width - 220; x += spacing) {
+        for (let y = 40; y < p.height - 20; y += spacing) {
+          let vf = currentModel.vectorField(x, y, t);
+          let mag = Math.hypot(vf.vx, vf.vy);
+          // normalize for arrow length display
+          let maxLen = 12;
+          let len = Math.min(maxLen, mag * 0.04);
+          if (mag > 0.0001) {
+            let ax = (vf.vx / mag) * len;
+            let ay = (vf.vy / mag) * len;
+            drawArrow(x, y, x + ax, y + ay, 1, vf);
+          }
+        }
+      }
+    }
+  }
+
+  function drawArrow(x1, y1, x2, y2, sw = 1, meta = null) {
+    p.stroke(50); p.strokeWeight(sw);
+    p.line(x1, y1, x2, y2);
+    // head
+    let angle = Math.atan2(y2 - y1, x2 - x1);
+    let h = 4;
+    p.push();
+    p.translate(x2, y2);
+    p.rotate(angle);
+    p.noStroke(); p.fill(50);
+    p.triangle(0, 0, -h, h / 2, -h, -h / 2);
+    p.pop();
+  }
+
+  function drawLorenzView() {
+    // Update Lorenz if autoPlay
+    let lor = currentModel;
+    // advance Lorenz trajectory and optionally render a 3D view
+    if (dt_global > 0) {
+      // step a few small increments to keep trajectory dense
+      for (let i = 0; i < 6; i++) {
+        let next = rk43D(lor.state, t, dt_global * 0.2, (x, y, z, tt) => lor.ode3(x, y, z, tt));
+        lor.state = next;
+        lor.trajectory.push({ ...next });
+        if (lor.trajectory.length > 1200) lor.trajectory.shift();
+      }
+      t += dt_global;
+    }
+
+    // render 3D projected attractor
+    p.noFill();
+    p.stroke(40, 120, 200, 80);
+    p.beginShape();
+    // simple rotation angle to spin the view
+    let view = { ang: p.frameCount * 0.002, scale: 6.0, cx: p.width / 2, cy: p.height / 2 };
+    for (let s of lor.trajectory) {
+      let pr = project3D(s.x, s.y, s.z, view);
+      p.vertex(pr.x, pr.y);
+    }
+    p.endShape();
+
+    // draw last point
+    if (lor.trajectory.length > 0) {
+      let last = lor.trajectory[lor.trajectory.length - 1];
+      let pr = project3D(last.x, last.y, last.z, { ang: p.frameCount * 0.002, scale: 6.0, cx: p.width / 2, cy: p.height / 2 });
+      p.fill(220, 80, 40); p.noStroke(); p.ellipse(pr.x, pr.y, 6, 6);
+    }
+  }
+
+  // --- mouse interaction: spawn tracer and show local normal curve ---
+  p.mousePressed = () => {
+    // only if clicked inside domain
+    if (p.mouseX < 60 || p.mouseX > p.width - 220 || p.mouseY < 40 || p.mouseY > p.height - 20) {
+      // outside domain for 2D; for Lorenz we can spawn Lorenz tracer if clicked anywhere
+      if (currentModel instanceof Lorenz) {
+        // spawn 3D tracer at some projection-based sample from click (map back)
+        let lor = currentModel;
+        // map click to small perturbation around lor.state
+        let newState = { x: lor.state.x + (Math.random() - 0.5) * 0.1, y: lor.state.y + (Math.random() - 0.5) * 0.1, z: lor.state.z + (Math.random() - 0.5) * 0.1 };
+        let tr3 = new Tracer3D(newState.x, newState.y, newState.z, p.color(20, 200, 120, 200));
+        // add to a special list: reuse tracers but store as 3D (we will draw in lorenz view)
+        // For simplicity, append to lor.trajectory as small burst (not full separate tracer list)
+        lor.trajectory.push(newState);
+        return;
+      } else return;
+    }
+
+    // spawn a tracer in 2D domain
+    let tr = new Tracer2D(p.mouseX, p.mouseY);
+    tracers.push(tr);
+
+    // if perturbation slider > 0, optionally spawn twin perturbed tracer
+    if (noiseSlider.value() > 0) {
+      let jitter = (noiseSlider.value() / 100.0) * 6.0;
+      let twin = new Tracer2D(p.mouseX + (Math.random() - 0.5) * jitter, p.mouseY + (Math.random() - 0.5) * jitter, p.color(255, 80, 80, 150));
+      tracersTwin.push(twin);
+    }
+
+    // compute local velocities around the click to show local normal distribution of speed magnitudes
+    if (showDensityOnClick) {
+      // sample local points in small radius and compute instantaneous speeds
+      let samples = [];
+      let radius = 30;
+      for (let i = 0; i < 80; i++) {
+        let rx = p.mouseX + (Math.random() - 0.5) * 2 * radius;
+        let ry = p.mouseY + (Math.random() - 0.5) * 2 * radius;
+        // only accept inside [mouse +/- radius]
+        if (Math.hypot(rx - p.mouseX, ry - p.mouseY) <= radius) {
+          let vf = currentModel.vectorField(rx, ry, t);
+          let speed = Math.hypot(vf.vx, vf.vy);
+          samples.push(speed);
+        }
+      }
+      // compute mean and std dev and display small density plot at click position
+      if (samples.length > 0) {
+        let mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+        let variance = samples.reduce((a, b) => a + (b - mean) * (b - mean), 0) / samples.length;
+        let std = Math.sqrt(variance);
+        // draw a small normal curve panel at click
+        drawLocalNormalPlot(p.mouseX + 10, p.mouseY + 10, samples, mean, std);
+      }
+    }
+
+    // show ODE and coefficients overlay briefly (we already render text persistently)
+  };
+
+  function drawLocalNormalPlot(px, py, samples, mean, std) {
+    // small panel
+    let w = 160, h = 110;
+    p.push();
+    p.translate(px, py);
+    p.fill(255); p.stroke(0); p.rect(0, 0, w, h);
+    // histogram
+    let bins = 20;
+    let minv = Math.min(...samples), maxv = Math.max(...samples);
+    if (minv === maxv) { minv = 0; maxv = minv + 1; }
+    let hist = new Array(bins).fill(0);
+    for (let s of samples) {
+      let idx = Math.floor(p.map(s, minv, maxv, 0, bins - 1));
+      idx = p.constrain(idx, 0, bins - 1);
+      hist[idx]++;
+    }
+    let maxC = Math.max(...hist);
+    // draw histogram bars
+    p.noStroke(); p.fill(120, 160, 200);
+    for (let i = 0; i < bins; i++) {
+      let bx = 10 + (i / bins) * (w - 20);
+      let bw = (w - 20) / bins;
+      let bh = p.map(hist[i], 0, maxC || 1, 0, h - 40);
+      p.rect(bx, h - 20 - bh, bw - 1, bh);
+    }
+    // overlay normal curve
+    p.noFill(); p.stroke(200, 30, 30); p.strokeWeight(2);
+    p.beginShape();
+    for (let i = 0; i < w - 20; i++) {
+      let x = p.map(i, 0, w - 20, minv, maxv);
+      let yval = (1 / (std * Math.sqrt(2 * Math.PI))) * Math.exp(-0.5 * ((x - mean) / (std || 1e-6)) ** 2);
+      // scale yval to panel
+      let y = p.map(yval, 0, 1 / (std || 1e-6), h - 40, h - 80); // crude scaling
+      p.vertex(10 + i, y);
+    }
+    p.endShape();
+    // annotations
+    p.noStroke(); p.fill(0); p.textSize(11);
+    p.textAlign(p.LEFT, p.TOP);
+    p.text(`local speed mean=${mean.toFixed(2)}`, 8, 4);
+    p.text(`std=${std.toFixed(2)} n=${samples.length}`, 8, 16);
+    p.pop();
+  }
+
+  // --- end of sketch
+};
+
+new p5(sketch);

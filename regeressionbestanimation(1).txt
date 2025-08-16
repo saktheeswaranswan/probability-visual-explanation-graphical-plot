@@ -1,0 +1,304 @@
+// p5.js sketch — final polished version
+// Features:
+// - Scatter of noisy linear data with interactive regression line
+// - Animated vertical boxplot that travels along the regression line
+// - Box shows Q1–Q3 (shaded IQR), median (bold), whiskers (Tukey fences), whisker caps
+// - Outliers flagged and shown as red dots
+// - Mean (purple dot) and Mode (orange triangle) markers
+// - Single-sided vertical density (normal approximation) to the right of the box
+// - Noise slider (controls gaussian noise amplitude)
+// - Speed slider + Play / Pause button
+// - Drag individual points horizontally to update regression
+// - Press R to regenerate base x positions, Space to toggle play/pause
+
+let sketch = (p) => {
+  // data & regression
+  let points = [];
+  let baseXs = [];
+  let baseYsNoNoise = []; // underlying linear y before noise
+  let m = 0, b = 0, r2 = 0;
+  const numPoints = 260;
+
+  // animation state
+  let t = 0; // parameter 0..1 along the regression line
+  let tSpeed = 0.002;
+  let autoPlay = true;
+
+  // UI
+  let noiseSlider, speedSlider, playPauseButton;
+
+  // interaction
+  let selectedPoint = null;
+  let draggingPoint = false;
+
+  p.setup = () => {
+    p.createCanvas(920, 640);
+    p.textFont('Arial');
+
+    // Controls
+    p.createDiv('Noise:').position(10, 6);
+    noiseSlider = p.createSlider(0, 120, 40, 1);
+    noiseSlider.position(70, 10);
+    noiseSlider.input(applyNoiseAndRecompute);
+
+    p.createDiv('Speed:').position(260, 6);
+    speedSlider = p.createSlider(0, 8, 2, 0.5);
+    speedSlider.position(310, 10);
+    speedSlider.input(() => { tSpeed = speedSlider.value() * 0.001; });
+
+    playPauseButton = p.createButton('Pause');
+    playPauseButton.position(420, 8);
+    playPauseButton.mousePressed(() => {
+      autoPlay = !autoPlay;
+      playPauseButton.html(autoPlay ? 'Pause' : 'Play');
+    });
+
+    // initial data
+    generateBaseData();
+    applyNoiseAndRecompute();
+  };
+
+  function generateBaseData() {
+    baseXs = [];
+    baseYsNoNoise = [];
+    for (let i = 0; i < numPoints; i++) {
+      baseXs.push(p.random(60, p.width - 220));
+    }
+    for (let i = 0; i < numPoints; i++) {
+      baseYsNoNoise[i] = 0.5 * baseXs[i] + 100; // base linear trend
+    }
+  }
+
+  function applyNoiseAndRecompute() {
+    let noiseAmp = noiseSlider ? noiseSlider.value() : 40;
+    points = [];
+    p.randomSeed(42);
+    for (let i = 0; i < numPoints; i++) {
+      let y = baseYsNoNoise[i] + p.randomGaussian() * noiseAmp;
+      points.push({ x: baseXs[i], y });
+    }
+    recomputeRegression();
+  }
+
+  function recomputeRegression() {
+    let lr = linearRegression(points);
+    m = lr.m; b = lr.b;
+    r2 = computeR2(points, m, b);
+  }
+
+  function linearRegression(data) {
+    let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+    for (let pnt of data) { sumX += pnt.x; sumY += pnt.y; sumXY += pnt.x * pnt.y; sumXX += pnt.x * pnt.x; }
+    let n = data.length;
+    let denom = (n * sumXX - sumX * sumX) || 1;
+    let m = (n * sumXY - sumX * sumY) / denom;
+    let b = (sumY - m * sumX) / n;
+    return { m, b };
+  }
+
+  function computeR2(data, m, b) {
+    let meanY = data.reduce((a, pnt) => a + pnt.y, 0) / data.length;
+    let ssTot = data.reduce((a, pnt) => a + Math.pow(pnt.y - meanY, 2), 0) || 1;
+    let ssRes = data.reduce((a, pnt) => a + Math.pow(pnt.y - (m * pnt.x + b), 2), 0);
+    return 1 - ssRes / ssTot;
+  }
+
+  // compute local quartiles, IQR, fences, whisker ends (non-outlier), mean, stddev, mode, outliers
+  function computeLocalYStats(centerX, windowHalf) {
+    let local = points.filter(pt => Math.abs(pt.x - centerX) <= windowHalf);
+    let ys = local.map(p => p.y).sort((a, b) => a - b);
+    if (ys.length < 6) ys = points.map(p => p.y).sort((a, b) => a - b);
+    let n = ys.length;
+    const qval = (arr, p) => arr[Math.max(0, Math.min(arr.length - 1, Math.floor(p * arr.length)))] || arr[0];
+    let q1 = qval(ys, 0.25), median = qval(ys, 0.5), q3 = qval(ys, 0.75);
+    let iqr = q3 - q1;
+    let lowerFence = q1 - 1.5 * iqr, upperFence = q3 + 1.5 * iqr;
+    let nonOutliers = ys.filter(v => v >= lowerFence && v <= upperFence);
+    let minW = nonOutliers.length ? nonOutliers[0] : ys[0];
+    let maxW = nonOutliers.length ? nonOutliers[nonOutliers.length - 1] : ys[ys.length - 1];
+    let mean = ys.reduce((a, v) => a + v, 0) / n;
+    let variance = ys.reduce((a, v) => a + Math.pow(v - mean, 2), 0) / n;
+    let stdDev = Math.sqrt(variance || 1);
+    let mode = computeMode(ys);
+    let outliers = ys.filter(v => v < lowerFence || v > upperFence);
+    return { q1, median, q3, iqr, lowerFence, upperFence, minW, maxW, min: ys[0], max: ys[ys.length - 1], mean, stdDev, mode, outliers };
+  }
+
+  // approximate mode via binning — robust for continuous noisy data
+  function computeMode(values, bins = 24) {
+    if (values.length === 0) return NaN;
+    let minV = Math.min(...values), maxV = Math.max(...values);
+    let range = maxV - minV || 1;
+    let binW = range / bins;
+    let counts = new Array(bins).fill(0);
+    for (let v of values) {
+      let idx = Math.floor((v - minV) / binW);
+      if (idx === bins) idx = bins - 1;
+      counts[idx]++;
+    }
+    let bestIdx = counts.reduce((best, c, i) => c > counts[best] ? i : best, 0);
+    return minV + bestIdx * binW + binW / 2;
+  }
+
+  function drawScatter(data) {
+    p.noStroke(); p.fill(50, 100, 200, 180);
+    for (let pt of data) p.ellipse(pt.x, pt.y, 6, 6);
+  }
+
+  function drawRegressionLine(m, b) {
+    p.stroke(200, 0, 0); p.strokeWeight(2);
+    let x1 = 40, x2 = p.width - 220;
+    p.line(x1, m * x1 + b, x2, m * x2 + b);
+    p.noStroke();
+  }
+
+  // Draw vertical boxplot with shaded IQR, whisker caps, mean/median/mode markers and outliers
+  function drawVerticalBoxPlot(cx, stats) {
+    let boxW = 40;
+    // shaded IQR
+    p.noStroke(); p.fill(245, 245, 255);
+    p.rectMode(p.CENTER);
+    p.rect(cx, (stats.q3 + stats.q1) / 2, boxW + 4, Math.max(8, stats.q1 - stats.q3));
+
+    // box border (rounded)
+    p.stroke(60); p.strokeWeight(1.2); p.noFill();
+    p.rect(cx, (stats.q3 + stats.q1) / 2, boxW, Math.max(6, stats.q1 - stats.q3), 6);
+
+    // median (bold)
+    p.stroke(10, 60, 160); p.strokeWeight(3);
+    p.line(cx - boxW / 2 - 6, stats.median, cx + boxW / 2 + 6, stats.median);
+
+    // mean marker
+    p.noStroke(); p.fill(120, 30, 180); p.ellipse(cx - 8, stats.mean, 8, 8);
+
+    // mode marker
+    p.fill(200, 80, 20);
+    let triSize = 8;
+    p.triangle(cx + 6, stats.mode - triSize / 2, cx + 6, stats.mode + triSize / 2, cx + 6 + triSize, stats.mode);
+
+    // whiskers to non-outlier ends
+    p.stroke(80); p.strokeWeight(1.5);
+    p.line(cx, stats.q3, cx, stats.maxW);
+    p.line(cx, stats.q1, cx, stats.minW);
+
+    // caps
+    p.strokeWeight(2);
+    p.line(cx - 10, stats.maxW, cx + 10, stats.maxW);
+    p.line(cx - 10, stats.minW, cx + 10, stats.minW);
+
+    // outliers
+    p.noStroke(); p.fill(220, 30, 30);
+    for (let v of stats.outliers) p.ellipse(cx + 2, v, 6, 6);
+
+    // annotations
+    p.fill(0); p.textSize(11); p.textAlign(p.LEFT, p.CENTER);
+    p.text(`Q1: ${stats.q1.toFixed(1)}`, cx + boxW / 2 + 12, stats.q1);
+    p.text(`Q3: ${stats.q3.toFixed(1)}`, cx + boxW / 2 + 12, stats.q3);
+    p.text(`IQR: ${stats.iqr.toFixed(1)}`, cx + boxW / 2 + 12, (stats.q1 + stats.q3) / 2);
+  }
+
+  // Single-sided vertical density to the right of the boxplot
+  function drawVerticalDensityRight(cx, stats) {
+    let meanY = stats.mean;
+    let stdDev = Math.max(stats.stdDev, 6);
+    let amp = 1 / (stdDev * Math.sqrt(2 * Math.PI));
+    let yStart = Math.max(10, meanY - 3 * stdDev);
+    let yEnd = Math.min(p.height - 10, meanY + 3 * stdDev);
+    let step = 1; let maxWidth = 80; let maxDensity = amp;
+
+    p.noStroke(); p.fill(0, 140, 40, 100);
+    p.beginShape(); p.vertex(cx, yStart);
+    for (let y = yStart; y <= yEnd; y += step) {
+      let density = amp * Math.exp(-0.5 * Math.pow((y - meanY) / stdDev, 2));
+      let x = cx + (density / maxDensity) * maxWidth;
+      p.vertex(x, y);
+    }
+    p.vertex(cx, yEnd); p.endShape(p.CLOSE);
+
+    // outline
+    p.noFill(); p.stroke(0, 110, 30); p.strokeWeight(1.2);
+    p.beginShape();
+    for (let y = yStart; y <= yEnd; y += step) {
+      let density = amp * Math.exp(-0.5 * Math.pow((y - meanY) / stdDev, 2));
+      let x = cx + (density / maxDensity) * maxWidth;
+      p.vertex(x, y);
+    }
+    p.endShape();
+
+    // mean marker (on ridge)
+    p.noStroke(); p.fill(120, 30, 180); p.ellipse(cx + 18, meanY, 8, 8);
+    // mode marker
+    p.fill(200, 80, 20);
+    p.triangle(cx + 6, stats.mode - 4, cx + 6, stats.mode + 4, cx + 14, stats.mode);
+  }
+
+  p.draw = () => {
+    p.background(255);
+
+    // scatter + regression
+    drawScatter(points);
+    drawRegressionLine(m, b);
+
+    // animate t
+    if (autoPlay) { t += tSpeed * (speedSlider ? speedSlider.value() : 2); if (t > 1) t = 0; }
+
+    // position along regression
+    let xStart = 60, xEnd = p.width - 220;
+    let boxX = p.lerp(xStart, xEnd, t);
+    let boxY = m * boxX + b;
+
+    let stats = computeLocalYStats(boxX, 100);
+
+    // draw density and box (density offset so it doesn't overlap box)
+    drawVerticalDensityRight(boxX + 90, stats);
+    drawVerticalBoxPlot(boxX, stats);
+
+    // regression marker
+    p.noStroke(); p.fill(0); p.ellipse(boxX, boxY, 6, 6);
+
+    // UI text
+    p.fill(0); p.textSize(12); p.textAlign(p.LEFT, p.TOP);
+    p.text(`R² = ${r2.toFixed(3)}`, p.width - 150, 12);
+    p.text(`Center x: ${boxX.toFixed(1)}, y: ${boxY.toFixed(1)}`, 10, 36);
+    p.text(`Mean: ${stats.mean.toFixed(1)}   Median: ${stats.median.toFixed(1)}   Mode: ${stats.mode.toFixed(1)}`, 10, 54);
+    p.text(`Q1: ${stats.q1.toFixed(1)}   Q3: ${stats.q3.toFixed(1)}   IQR: ${stats.iqr.toFixed(1)}`, 10, 72);
+    p.text(`StdDev: ${stats.stdDev.toFixed(1)}   Outliers: ${stats.outliers.length}`, 10, 90);
+  };
+
+  p.mousePressed = () => {
+    for (let pt of points) {
+      if (p.dist(p.mouseX, p.mouseY, pt.x, pt.y) < 6) {
+        selectedPoint = pt; draggingPoint = true; return;
+      }
+    }
+  };
+
+  p.mouseDragged = () => {
+    if (draggingPoint && selectedPoint) {
+      selectedPoint.x = p.constrain(p.mouseX, 20, p.width - 20);
+      selectedPoint.y = m * selectedPoint.x + b; // snap y to regression for clarity
+    }
+  };
+
+  p.mouseReleased = () => {
+    if (draggingPoint) {
+      // update nearest baseX so regeneration keeps this change
+      let closestIdx = 0; let bestDist = Infinity;
+      for (let i = 0; i < baseXs.length; i++) {
+        let d = Math.abs(baseXs[i] - selectedPoint.x);
+        if (d < bestDist) { bestDist = d; closestIdx = i; }
+      }
+      baseXs[closestIdx] = selectedPoint.x;
+      baseYsNoNoise[closestIdx] = selectedPoint.y;
+      applyNoiseAndRecompute();
+    }
+    draggingPoint = false;
+  };
+
+  p.keyPressed = () => {
+    if (p.key === 'R' || p.key === 'r') { generateBaseData(); applyNoiseAndRecompute(); }
+    if (p.key === ' ') { autoPlay = !autoPlay; if (playPauseButton) playPauseButton.html(autoPlay ? 'Pause' : 'Play'); }
+  };
+};
+
+new p5(sketch);

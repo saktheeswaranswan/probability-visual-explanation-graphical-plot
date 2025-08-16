@@ -1,0 +1,343 @@
+// Hydrogen orbital visualizer — rewritten for stability and smooth animation
+// Features:
+// - Real-form spherical-harmonic approximations for s,p,d,f
+// - Smooth superposition mixing
+// - Stabilized electron that follows an interpolated path on the surface (no popping)
+// - On-screen controls (sliders / checkboxes) to tweak animation & mixing
+// - Keyboard shortcuts preserved
+
+let cols = 60;
+let rows = 90;
+let mesh = [];                // (cols+1) x (rows+1) grid of {theta,phi,pos,prob}
+let baseRadius = 120;
+let orbital = { l: 0, m: 0, n: 1 };
+let mixOrbital = null;
+
+let surfaceScale = 1.0;
+let mixAmount = 0.5;
+let animateElectron = true;
+let electronT = 0;
+let spinAngle = 0;
+
+let viewRotX = -0.4;
+let viewRotY = 0.4;
+
+let gui = {};
+let detail = { cols: cols, rows: rows };
+
+function setup() {
+  createCanvas(windowWidth, windowHeight, WEBGL);
+  noStroke();
+  createMesh(detail.cols, detail.rows);
+
+  // Simple DOM controls
+  gui.surfaceSlider = createSlider(0.4, 2.0, 1.0, 0.01).position(12, 12).style('width','180px');
+  gui.mixSlider = createSlider(0, 1, 0.5, 0.01).position(12, 38).style('width','180px');
+  gui.speedSlider = createSlider(0.1, 4.0, 1.0, 0.01).position(12, 64).style('width','180px');
+  gui.ampSlider = createSlider(0, 2.5, 1.0, 0.01).position(12, 90).style('width','180px');
+
+  gui.toggleMix = createCheckbox('Superpose next orbital (S)', false).position(210, 12);
+  gui.toggleAnimate = createCheckbox('Animate electron (A)', true).position(210, 36);
+
+  // note: we'll sync these to internal vars each frame
+}
+
+function createMesh(c, r) {
+  cols = c;
+  rows = r;
+  mesh = [];
+  for (let i = 0; i <= cols; i++) {
+    let theta = map(i, 0, cols, 0, PI);
+    let row = [];
+    for (let j = 0; j <= rows; j++) {
+      let phi = map(j, 0, rows, 0, TWO_PI);
+      row.push({ theta, phi, pos: createVector(0, 0, 0), prob: 0 });
+    }
+    mesh.push(row);
+  }
+  // compute once initially
+  computeMesh(mesh, orbital, mixOrbital, mixAmount, surfaceScale);
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+}
+
+function draw() {
+  background(18);
+
+  // sync GUI
+  surfaceScale = gui.surfaceSlider.value();
+  mixAmount = gui.mixSlider.value();
+  let speedFactor = gui.speedSlider.value();
+  let ampFactor = gui.ampSlider.value();
+  if (gui.toggleMix.checked()) {
+    if (!mixOrbital) {
+      let nextL = min(3, orbital.l + 1);
+      mixOrbital = { l: nextL, m: 0, n: nextL + 1 };
+    }
+  } else {
+    mixOrbital = null;
+  }
+  animateElectron = gui.toggleAnimate.checked();
+
+  // lights & camera
+  orbitControl(); // keep for convenience (mouse drag)
+  ambientLight(60);
+  directionalLight(255, 255, 255, -0.5, -0.8, -0.3);
+  directionalLight(60, 80, 160, 0.8, 0.4, -0.4);
+
+  push();
+  rotateX(viewRotX);
+  rotateY(viewRotY);
+
+  // center nucleus
+  push();
+  noStroke();
+  ambientMaterial(250, 160, 20);
+  sphere(14);
+  pop();
+
+  // recompute mesh (cheap; small grid)
+  computeMesh(mesh, orbital, mixOrbital, mixAmount, surfaceScale);
+
+  // draw orbital surface
+  push();
+  translate(0, 0, 0);
+  rotateX(HALF_PI); // map theta/phi to correct orientation
+  fill(60, 140, 240, 90);
+  smooth();
+  drawMeshSurface(mesh);
+  pop();
+
+  // electron motion timing (frame-rate independent)
+  if (animateElectron) {
+    electronT += (deltaTime * 0.001) * speedFactor;
+  }
+
+  // get interpolated electron point (continuous theta/phi)
+  let e = electronAlongSurfaceInterpolated(mesh, electronT, ampFactor);
+  if (e) drawElectron(e);
+
+  // spins
+  spinAngle += 0.08 * speedFactor;
+
+  pop(); // end world transforms
+
+  drawOverlay(); // UI texts
+}
+
+// compute mesh positions & probabilities
+function computeMesh(mesh, orb, mixOrb, alpha, scale) {
+  for (let i = 0; i <= cols; i++) {
+    for (let j = 0; j <= rows; j++) {
+      let node = mesh[i][j];
+      let th = node.theta;
+      let ph = node.phi;
+
+      let prob1 = angularProbability(orb.l, orb.m, th, ph);
+      let combined = prob1;
+
+      if (mixOrb) {
+        let prob2 = angularProbability(mixOrb.l, mixOrb.m, th, ph);
+        combined = lerp(prob1, prob2, alpha);
+      }
+
+      // radial envelope (simple approximate radial node weight)
+      let radius = baseRadius * (0.45 + 0.9 * combined) * scale;
+
+      let x = radius * sin(th) * cos(ph);
+      let y = radius * cos(th);
+      let z = radius * sin(th) * sin(ph);
+      node.pos.set(x, y, z);
+      node.prob = combined;
+    }
+  }
+}
+
+// Draw triangles using TRIANGLE_STRIP rows — color based on probability
+function drawMeshSurface(mesh) {
+  for (let i = 0; i < cols; i++) {
+    beginShape(TRIANGLE_STRIP);
+    for (let j = 0; j <= rows; j++) {
+      let a = mesh[i][j].pos;
+      let b = mesh[i + 1][j].pos;
+      let ca = probabilityColor(mesh[i][j].prob);
+      let cb = probabilityColor(mesh[i + 1][j].prob);
+      fill(ca);
+      vertex(a.x, a.y, a.z);
+      fill(cb);
+      vertex(b.x, b.y, b.z);
+    }
+    endShape();
+  }
+}
+
+function probabilityColor(p) {
+  let v = constrain(p, 0, 1);
+  let r = lerp(20, 80, v);
+  let g = lerp(60, 200, v);
+  let b = lerp(180, 255, v);
+  return color(r, g, b, 200);
+}
+
+// approximate real spherical harmonics / real-forms for l<=3
+function angularProbability(l, m, theta, phi) {
+  let Y = 0;
+  if (l === 0) {
+    Y = 1.0;
+  } else if (l === 1) {
+    if (m === 0) Y = cos(theta);
+    else if (m === 1) Y = sin(theta) * cos(phi);
+    else if (m === -1) Y = sin(theta) * sin(phi);
+  } else if (l === 2) {
+    if (m === 0) Y = 0.5 * (3 * cos(theta) * cos(theta) - 1);
+    else if (m === 1) Y = sin(theta) * cos(theta) * cos(phi);
+    else if (m === -1) Y = sin(theta) * cos(theta) * sin(phi);
+    else if (m === 2) Y = sin(theta) * sin(theta) * cos(2 * phi);
+    else if (m === -2) Y = sin(theta) * sin(theta) * sin(2 * phi);
+  } else if (l === 3) {
+    if (m === 0) Y = 0.25 * (5 * pow(cos(theta), 3) - 3 * cos(theta));
+    else if (m === 1) Y = pow(sin(theta), 1) * (5 * pow(cos(theta), 2) - 1) * cos(phi);
+    else if (m === -1) Y = pow(sin(theta), 1) * (5 * pow(cos(theta), 2) - 1) * sin(phi);
+    else if (m === 2) Y = pow(sin(theta), 2) * cos(theta) * cos(2 * phi);
+    else if (m === -2) Y = pow(sin(theta), 2) * cos(theta) * sin(2 * phi);
+    else if (m === 3) Y = pow(sin(theta), 3) * cos(3 * phi);
+    else if (m === -3) Y = pow(sin(theta), 3) * sin(3 * phi);
+  }
+
+  let val = Y * Y;
+  return constrain(val * 1.5, 0, 1.0);
+}
+
+// Draw electron with little spin torus
+function drawElectron(posVec) {
+  push();
+  translate(posVec.x, posVec.y, posVec.z);
+  push();
+  rotateY(spinAngle * 2.5);
+  ambientMaterial(240, 60, 140);
+  sphere(6);
+  pop();
+  push();
+  rotateX(spinAngle * 6.0);
+  noFill();
+  stroke(200, 220, 255);
+  strokeWeight(1.5);
+  torus(10, 1.2);
+  pop();
+  pop();
+}
+
+// --- INTERPOLATED SAMPLING ---
+// We want a continuous mapping from t -> (theta, phi) and sample mesh smoothly.
+// We bilinearly interpolate between neighboring grid points to avoid jumps.
+
+function electronAlongSurfaceInterpolated(mesh, t, amplitudeFactor) {
+  // choose continuous phi and theta fractions
+  // phi rotates steadily; theta oscillates slowly
+  let phi = (t * 0.9) % TWO_PI;
+  let thetaPhase = sin(t * 0.7) * 0.5 + 0.5; // [0,1]
+
+  // convert to fractional indices in mesh grid (0 .. cols, 0 .. rows)
+  let iF = thetaPhase * cols;    // fractional row index (0..cols)
+  let jF = map(phi, 0, TWO_PI, 0, rows); // fractional column index (0..rows)
+
+  // clamp so we can sample neighbors safely
+  iF = constrain(iF, 0, cols - 0.0001);
+  jF = constrain(jF, 0, rows - 0.0001);
+
+  // integer base
+  let i0 = floor(iF);
+  let j0 = floor(jF);
+  let i1 = min(i0 + 1, cols);
+  let j1 = (j0 + 1) % (rows + 1); // wrap phi index around
+
+  // fractional weights
+  let si = iF - i0;
+  let sj = jF - j0;
+
+  // get grid positions
+  let p00 = mesh[i0][j0].pos;
+  let p10 = mesh[i1][j0].pos;
+  let p01 = mesh[i0][j1].pos;
+  let p11 = mesh[i1][j1].pos;
+
+  // bilinear interpolation
+  // pos = (1-si)*(1-sj)*p00 + si*(1-sj)*p10 + (1-si)*sj*p01 + si*sj*p11
+  let pos = createVector(0,0,0);
+  let temp = createVector(0,0,0);
+
+  temp.set(p00).mult((1 - si) * (1 - sj)); pos.add(temp);
+  temp.set(p10).mult(si * (1 - sj)); pos.add(temp);
+  temp.set(p01).mult((1 - si) * sj); pos.add(temp);
+  temp.set(p11).mult(si * sj); pos.add(temp);
+
+  // small outward breathing so electron sits slightly off the surface
+  let outward = pos.copy().normalize().mult(6 * sin(t * 6.0) * 0.2 * amplitudeFactor);
+  pos.add(outward);
+
+  return pos;
+}
+
+// --- keyboard controls ---
+
+function keyPressed() {
+  if (key === '1') { orbital = { l: 0, m: 0, n: 1 }; mixOrbital = null; gui.toggleMix.checked(false); }
+  if (key === '2') { orbital = { l: 1, m: 0, n: 2 }; mixOrbital = null; gui.toggleMix.checked(false); }
+  if (key === '3') { orbital = { l: 2, m: 0, n: 3 }; mixOrbital = null; gui.toggleMix.checked(false); }
+  if (key === '4') { orbital = { l: 3, m: 0, n: 4 }; mixOrbital = null; gui.toggleMix.checked(false); }
+
+  if (key === 'M' || key === 'm') {
+    let l = orbital.l;
+    if (l === 0) orbital.m = 0;
+    else {
+      orbital.m++;
+      if (orbital.m > l) orbital.m = -l;
+    }
+  }
+
+  if (key === 'S' || key === 's') {
+    // toggle the checkbox which controls the mixing state
+    gui.toggleMix.checked(!gui.toggleMix.checked());
+  }
+
+  if (key === 'A' || key === 'a') {
+    gui.toggleAnimate.checked(!gui.toggleAnimate.checked());
+  }
+
+  if (key === 'H' || key === 'h') {
+    // hide/show sliders quickly by toggling their .style('display')
+    let visible = gui.surfaceSlider.style('display') !== 'none';
+    let d = visible ? 'none' : 'block';
+    gui.surfaceSlider.style('display', d);
+    gui.mixSlider.style('display', d);
+    gui.speedSlider.style('display', d);
+    gui.ampSlider.style('display', d);
+    gui.toggleMix.elt.style.display = d;
+    gui.toggleAnimate.elt.style.display = d;
+  }
+
+  if (key === 'R' || key === 'r') { viewRotX = -0.4; viewRotY = 0.4; }
+
+  if (key === '+') surfaceScale *= 1.12;
+  if (key === '-') surfaceScale /= 1.12;
+}
+
+// Overlay text (2D GUI hint)
+function drawOverlay() {
+  push();
+  // reset transform so text is drawn in screen-space
+  resetMatrix();
+  translate(-width / 2, -height / 2, 0);
+  noLights();
+  fill(255);
+  textSize(13);
+  textAlign(LEFT, TOP);
+
+  text(`Orbital: l=${orbital.l} m=${orbital.m} (press 1..4). Superposition: ${mixOrbital ? 'ON' : 'OFF'} (S toggles)`, 12, height - 120);
+  text(`Animation: ${animateElectron ? 'ON' : 'OFF'} (A toggles). Surface scale: ${nf(surfaceScale,1,2)} (+/-)`, 12, height - 100);
+  text(`Sliders: surface / mix / speed / amplitude (top-left). Use mouse to orbit, H hides UI.`, 12, height - 80);
+  text(`Keys: 1=s, 2=p, 3=d, 4=f | m cycles m | S superpose | A toggle | R reset view`, 12, height - 60);
+  pop();
+}

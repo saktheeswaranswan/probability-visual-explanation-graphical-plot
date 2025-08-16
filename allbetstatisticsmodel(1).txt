@@ -1,0 +1,289 @@
+// p5.js Sketch: Multiple Models Viewer (OOP)
+// Clean version — no syntax errors
+
+let sketch = (p) => {
+  let models = {};
+  let currentModel;
+  let modelSelector;
+
+  let noiseSlider, speedSlider, playPauseButton;
+  let autoPlay = true;
+  let t = 0, tSpeed = 0.002;
+
+  // ---------- BASE CLASS ----------
+  class Model {
+    constructor(name) {
+      this.name = name;
+      this.points = [];
+      this.coeffs = {}; // parameters
+      this.r2 = 0;
+    }
+    generateData(n = 200, noiseAmp = 40) {}
+    fit() {}
+    predict(x) { return 0; }
+    computeR2() {
+      let meanY = this.points.reduce((A, p) => A + p.y, 0) / this.points.length;
+      let ssTot = this.points.reduce((A, p) => A + Math.pow(p.y - meanY, 2), 0) || 1;
+      let ssRes = this.points.reduce((A, p) => {
+        let yhat = this.predict(p.x);
+        return A + Math.pow(p.y - yhat, 2);
+      }, 0);
+      this.r2 = 1 - ssRes / ssTot;
+    }
+    drawCurve() {}
+  }
+
+  // ---------- LINEAR ----------
+  class LinearModel extends Model {
+    constructor() { super("Linear Regression"); }
+    generateData(n=200, noiseAmp=40) {
+      this.points = [];
+      p.randomSeed(42);
+      for (let i=0;i<n;i++) {
+        let x = p.random(60, p.width-220);
+        let yTrue = 0.6*x + 80; // true line
+        let y = yTrue + p.randomGaussian()*noiseAmp;
+        this.points.push({x,y});
+      }
+      this.fit();
+    }
+    fit() {
+      let n = this.points.length;
+      let Sx=0,Sy=0,Sxx=0,Sxy=0;
+      for (let pt of this.points) {
+        Sx+=pt.x; Sy+=pt.y; Sxx+=pt.x*pt.x; Sxy+=pt.x*pt.y;
+      }
+      let slope = (n*Sxy - Sx*Sy)/(n*Sxx - Sx*Sx);
+      let intercept = (Sy - slope*Sx)/n;
+      this.coeffs = {a:slope, b:intercept};
+      this.computeR2();
+    }
+    predict(x) { return this.coeffs.a*x + this.coeffs.b; }
+    drawCurve() {
+      p.stroke(200,0,0); p.strokeWeight(2);
+      p.line(60,this.predict(60),p.width-220,this.predict(p.width-220));
+    }
+  }
+
+  // ---------- QUADRATIC ----------
+  class QuadraticModel extends Model {
+    constructor() { super("Quadratic Regression"); }
+    generateData(n=200, noiseAmp=40) {
+      this.points=[];
+      p.randomSeed(42);
+      for (let i=0;i<n;i++) {
+        let x = p.random(60,p.width-220);
+        let yTrue = 0.0002*x*x + 0.5*x + 100;
+        let y = yTrue + p.randomGaussian()*noiseAmp;
+        this.points.push({x,y});
+      }
+      this.fit();
+    }
+    fit() {
+      let n=this.points.length;
+      let Sx=0,Sx2=0,Sx3=0,Sx4=0,Sy=0,Sxy=0,Sx2y=0;
+      for (let pt of this.points) {
+        let x=pt.x, y=pt.y, x2=x*x;
+        Sx+=x; Sx2+=x2; Sx3+=x2*x; Sx4+=x2*x2;
+        Sy+=y; Sxy+=x*y; Sx2y+=x2*y;
+      }
+      let A=[[Sx4,Sx3,Sx2],[Sx3,Sx2,Sx],[Sx2,Sx,n]];
+      let B=[Sx2y,Sxy,Sy];
+      let sol=solveLinearSystem3(A,B);
+      this.coeffs={a:sol[0],b:sol[1],c:sol[2]};
+      this.computeR2();
+    }
+    predict(x){let {a,b,c}=this.coeffs; return a*x*x+b*x+c;}
+    drawCurve(){
+      p.stroke(200,0,0); p.noFill(); p.beginShape();
+      for (let x=60;x<=p.width-220;x+=4) p.vertex(x,this.predict(x));
+      p.endShape();
+    }
+  }
+
+  // ---------- EXPONENTIAL ----------
+  class ExponentialModel extends Model {
+    constructor() { super("Exponential Regression"); }
+    generateData(n=200, noiseAmp=40) {
+      this.points=[];
+      p.randomSeed(42);
+      for (let i=0;i<n;i++) {
+        let x=p.random(60,p.width-220);
+        let yTrue=50*Math.exp(0.005*x);
+        let y=yTrue+p.randomGaussian()*noiseAmp;
+        this.points.push({x,y});
+      }
+      this.fit();
+    }
+    fit() {
+      let X=[],Y=[];
+      for (let pt of this.points) if (pt.y>0){X.push(pt.x); Y.push(Math.log(pt.y));}
+      let n=X.length, Sx=0,Sy=0,Sxx=0,Sxy=0;
+      for (let i=0;i<n;i++){Sx+=X[i];Sy+=Y[i];Sxx+=X[i]*X[i];Sxy+=X[i]*Y[i];}
+      let b=(n*Sxy-Sx*Sy)/(n*Sxx-Sx*Sx);
+      let a=Math.exp((Sy-b*Sx)/n);
+      this.coeffs={a:a,b:b};
+      this.computeR2();
+    }
+    predict(x){let {a,b}=this.coeffs; return a*Math.exp(b*x);}
+    drawCurve(){
+      p.stroke(200,0,0);p.noFill();p.beginShape();
+      for(let x=60;x<=p.width-220;x+=4)p.vertex(x,this.predict(x));
+      p.endShape();
+    }
+  }
+
+  // ---------- LOGISTIC ----------
+  class LogisticModel extends Model {
+    constructor(){super("Logistic Regression");}
+    generateData(n=200, noiseAmp=20){
+      this.points=[];
+      p.randomSeed(42);
+      for(let i=0;i<n;i++){
+        let x=p.random(60,p.width-220);
+        let yTrue=300/(1+Math.exp(-0.02*(x-400)));
+        let y=yTrue+p.randomGaussian()*noiseAmp;
+        this.points.push({x,y});
+      }
+      this.fit();
+    }
+    fit(){this.coeffs={K:300,r:0.02,x0:400};this.computeR2();}
+    predict(x){let {K,r,x0}=this.coeffs; return K/(1+Math.exp(-r*(x-x0)));}
+    drawCurve(){
+      p.stroke(200,0,0);p.noFill();p.beginShape();
+      for(let x=60;x<=p.width-220;x+=4)p.vertex(x,this.predict(x));
+      p.endShape();
+    }
+  }
+
+  // ---------- SETUP ----------
+  p.setup=()=>{
+    p.createCanvas(960,640);
+    p.textFont('Arial');
+
+    p.createSpan('Model: ').position(10,5);
+    modelSelector=p.createSelect().position(70,5);
+    ["Linear Regression","Quadratic Regression","Exponential Regression","Logistic Regression"]
+      .forEach(name=>modelSelector.option(name));
+    modelSelector.changed(()=>{
+      currentModel=models[modelSelector.value()];
+      currentModel.generateData(200,noiseSlider.value());
+    });
+
+    p.createSpan('Noise: ').position(220,5);
+    noiseSlider=p.createSlider(0,120,40,1).position(280,5).style('width','100px');
+    noiseSlider.input(()=>{currentModel.generateData(200,noiseSlider.value());});
+
+    p.createSpan('Speed: ').position(400,5);
+    speedSlider=p.createSlider(0,8,2,0.5).position(460,5);
+    speedSlider.input(()=>{tSpeed=speedSlider.value()*0.001;});
+
+    playPauseButton=p.createButton('Pause').position(540,5);
+    playPauseButton.mousePressed(()=>{
+      autoPlay=!autoPlay;playPauseButton.html(autoPlay?'Pause':'Play');
+    });
+
+    models["Linear Regression"]=new LinearModel();
+    models["Quadratic Regression"]=new QuadraticModel();
+    models["Exponential Regression"]=new ExponentialModel();
+    models["Logistic Regression"]=new LogisticModel();
+
+    currentModel=models["Linear Regression"];
+    currentModel.generateData(200,40);
+  };
+
+  // ---------- DRAW ----------
+  p.draw=()=>{
+    p.background(255);
+
+    drawScatter(currentModel.points);
+    currentModel.drawCurve();
+
+    if(autoPlay){t+=tSpeed;if(t>1)t=0;}
+
+    let xStart=60,xEnd=p.width-220;
+    let boxX=p.lerp(xStart,xEnd,t);
+    let boxY=currentModel.predict(boxX);
+
+    let stats=computeLocalYStats(currentModel.points,boxX,100);
+
+    drawVerticalDensityRight(boxX+90,stats);
+    drawVerticalBoxPlot(boxX,stats);
+
+    p.fill(0);p.noStroke();p.ellipse(boxX,boxY,6,6);
+
+    p.fill(0);p.textSize(12);p.textAlign(p.LEFT,p.TOP);
+    p.text(`${currentModel.name}`,10,40);
+    p.text(`R²=${currentModel.r2.toFixed(3)}`,10,58);
+  };
+
+  // ---------- HELPERS ----------
+  function solveLinearSystem3(A,B){
+    let M=A.map((r,i)=>r.concat(B[i]));
+    let n=3;
+    for(let i=0;i<n;i++){
+      let maxRow=i;
+      for(let k=i+1;k<n;k++) if(Math.abs(M[k][i])>Math.abs(M[maxRow][i])) maxRow=k;
+      [M[i],M[maxRow]]=[M[maxRow],M[i]];
+      let div=M[i][i];
+      for(let j=i;j<=n;j++) M[i][j]/=div;
+      for(let k=0;k<n;k++){
+        if(k!==i){
+          let factor=M[k][i];
+          for(let j=i;j<=n;j++) M[k][j]-=factor*M[i][j];
+        }
+      }
+    }
+    return M.map(r=>r[n]);
+  }
+
+  function computeLocalYStats(data,cx,win){
+    let ys=data.filter(pt=>Math.abs(pt.x-cx)<win/2).map(pt=>pt.y).sort((a,b)=>a-b);
+    if(ys.length===0) return {q1:0,median:0,q3:0,min:0,max:0};
+    function quantile(arr,q){
+      let pos=(arr.length-1)*q;
+      let base=Math.floor(pos), rest=pos-base;
+      return arr[base]+(arr[base+1]-arr[base]||0)*rest;
+    }
+    let q1=quantile(ys,0.25), median=quantile(ys,0.5), q3=quantile(ys,0.75);
+    return {q1,median,q3,min:ys[0],max:ys[ys.length-1],ys};
+  }
+
+  function drawScatter(data){
+    p.noStroke();p.fill(50,100,200,180);
+    for(let pt of data) p.ellipse(pt.x,pt.y,6,6);
+  }
+
+  function drawVerticalBoxPlot(cx,stats){
+    if(!stats) return;
+    let {q1,median,q3,min,max}=stats;
+    p.stroke(0);p.fill(180,200,255,150);
+    p.rect(cx-20,q3,40,q1-q3);
+    p.line(cx-20,median,cx+20,median);
+    p.line(cx,min,cx,q1);
+    p.line(cx,max,cx,q3);
+    p.line(cx-10,min,cx+10,min);
+    p.line(cx-10,max,cx+10,max);
+  }
+
+  function drawVerticalDensityRight(cx,stats){
+    if(!stats||!stats.ys) return;
+    let ys=stats.ys;
+    let minY=ys[0], maxY=ys[ys.length-1];
+    let bins=20, hist=new Array(bins).fill(0);
+    for(let y of ys){
+      let idx=Math.floor((y-minY)/(maxY-minY+1e-6)*bins);
+      idx=p.constrain(idx,0,bins-1); hist[idx]++;
+    }
+    let maxCount=Math.max(...hist);
+    p.noStroke();p.fill(200,100,50,120);
+    for(let i=0;i<bins;i++){
+      let y1=p.map(i,bins,0,minY,maxY);
+      let y2=p.map(i+1,bins,0,minY,maxY);
+      let barWidth=p.map(hist[i],0,maxCount,0,60);
+      p.rect(cx,y1,barWidth,y2-y1);
+    }
+  }
+};
+
+new p5(sketch);

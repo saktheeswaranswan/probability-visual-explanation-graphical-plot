@@ -1,0 +1,365 @@
+// p5.js sketch — quadratic regression version
+// Changes from previous linear version:
+// - Uses a quadratic model y = a*x^2 + b*x + c fitted by least-squares
+// - The animated boxplot travels along the quadratic curve
+// - Dragged points snap to the quadratic curve; regression updates after release
+// - R² computed for the quadratic fit
+// All other UI and visualization (IQR box, density, mean/median/mode, sliders) kept.
+
+let sketch = (p) => {
+  // data & regression
+  let points = [];
+  let baseXs = [];
+  let baseYsNoNoise = []; // underlying quadratic y before noise
+  let qa = 0, qb = 0, qc = 0, r2 = 0;
+  const numPoints = 260;
+
+  // true underlying quadratic used to generate base data
+  const trueA = 0.0002;
+  const trueB = 0.5;
+  const trueC = 100;
+
+  // animation state
+  let t = 0; // parameter 0..1 along the regression curve
+  let tSpeed = 0.002;
+  let autoPlay = true;
+
+  // UI
+  let noiseSlider, speedSlider, playPauseButton;
+
+  // interaction
+  let selectedPoint = null;
+  let draggingPoint = false;
+
+  p.setup = () => {
+    p.createCanvas(920, 640);
+    p.textFont('Arial');
+
+    // Controls
+    p.createDiv('Noise:').position(10, 6);
+    noiseSlider = p.createSlider(0, 120, 40, 1);
+    noiseSlider.position(70, 10);
+    noiseSlider.input(applyNoiseAndRecompute);
+
+    p.createDiv('Speed:').position(260, 6);
+    speedSlider = p.createSlider(0, 8, 2, 0.5);
+    speedSlider.position(310, 10);
+    speedSlider.input(() => { tSpeed = speedSlider.value() * 0.001; });
+
+    playPauseButton = p.createButton('Pause');
+    playPauseButton.position(420, 8);
+    playPauseButton.mousePressed(() => {
+      autoPlay = !autoPlay;
+      playPauseButton.html(autoPlay ? 'Pause' : 'Play');
+    });
+
+    // initial data
+    generateBaseData();
+    applyNoiseAndRecompute();
+  };
+
+  function generateBaseData() {
+    baseXs = [];
+    baseYsNoNoise = [];
+    for (let i = 0; i < numPoints; i++) {
+      let x = p.random(60, p.width - 220);
+      baseXs.push(x);
+    }
+    for (let i = 0; i < numPoints; i++) {
+      baseYsNoNoise[i] = trueA * Math.pow(baseXs[i], 2) + trueB * baseXs[i] + trueC; // base quadratic trend
+    }
+  }
+
+  function applyNoiseAndRecompute() {
+    let noiseAmp = noiseSlider ? noiseSlider.value() : 40;
+    points = [];
+    p.randomSeed(42);
+    for (let i = 0; i < numPoints; i++) {
+      let y = baseYsNoNoise[i] + p.randomGaussian() * noiseAmp;
+      points.push({ x: baseXs[i], y });
+    }
+    recomputeQuadratic();
+  }
+
+  function recomputeQuadratic() {
+    let qr = quadraticRegression(points);
+    qa = qr.a; qb = qr.b; qc = qr.c;
+    r2 = computeR2Quadratic(points, qa, qb, qc);
+  }
+
+  // fit quadratic y = a x^2 + b x + c using normal equations (3x3)
+  function quadraticRegression(data) {
+    // build sums
+    let n = data.length;
+    let Sx = 0, Sx2 = 0, Sx3 = 0, Sx4 = 0;
+    let Sy = 0, Sxy = 0, Sx2y = 0;
+    for (let pnt of data) {
+      let x = pnt.x;
+      let y = pnt.y;
+      let x2 = x * x;
+      Sx += x;
+      Sx2 += x2;
+      Sx3 += x2 * x;
+      Sx4 += x2 * x2;
+      Sy += y;
+      Sxy += x * y;
+      Sx2y += x2 * y;
+    }
+    // normal equations matrix (3x3): [[Sx4, Sx3, Sx2],[Sx3,Sx2,Sx],[Sx2,Sx,n]]  * [a,b,c] = [Sx2y,Sxy,Sy]
+    let A = [
+      [Sx4, Sx3, Sx2],
+      [Sx3, Sx2, Sx],
+      [Sx2, Sx, n]
+    ];
+    let Y = [Sx2y, Sxy, Sy];
+    let sol = solveLinearSystem3(A, Y);
+    return { a: sol[0], b: sol[1], c: sol[2] };
+  }
+
+  // simple Gaussian elimination for 3x3 system
+  function solveLinearSystem3(A, Y) {
+    // clone
+    let M = [A[0].slice(), A[1].slice(), A[2].slice()];
+    let B = Y.slice();
+    for (let k = 0; k < 3; k++) {
+      // pivot
+      let maxRow = k;
+      for (let i = k + 1; i < 3; i++) if (Math.abs(M[i][k]) > Math.abs(M[maxRow][k])) maxRow = i;
+      if (maxRow !== k) {
+        let tmp = M[k]; M[k] = M[maxRow]; M[maxRow] = tmp;
+        let t = B[k]; B[k] = B[maxRow]; B[maxRow] = t;
+      }
+      // singular guard
+      if (Math.abs(M[k][k]) < 1e-12) continue;
+      // eliminate
+      for (let i = k + 1; i < 3; i++) {
+        let f = M[i][k] / M[k][k];
+        for (let j = k; j < 3; j++) M[i][j] -= f * M[k][j];
+        B[i] -= f * B[k];
+      }
+    }
+    // back substitution
+    let x = [0, 0, 0];
+    for (let i = 2; i >= 0; i--) {
+      let s = B[i];
+      for (let j = i + 1; j < 3; j++) s -= M[i][j] * x[j];
+      x[i] = Math.abs(M[i][i]) < 1e-12 ? 0 : s / M[i][i];
+    }
+    return x;
+  }
+
+  function computeR2Quadratic(data, a, b, c) {
+    let meanY = data.reduce((A, p) => A + p.y, 0) / data.length;
+    let ssTot = data.reduce((A, p) => A + Math.pow(p.y - meanY, 2), 0) || 1;
+    let ssRes = data.reduce((A, p) => {
+      let yhat = a * p.x * p.x + b * p.x + c;
+      return A + Math.pow(p.y - yhat, 2);
+    }, 0);
+    return 1 - ssRes / ssTot;
+  }
+
+  // rest of the helpers are kept mostly the same (quartiles, mode, drawing, etc.)
+  function computeLocalYStats(centerX, windowHalf) {
+    let local = points.filter(pt => Math.abs(pt.x - centerX) <= windowHalf);
+    let ys = local.map(p => p.y).sort((a, b) => a - b);
+    if (ys.length < 6) ys = points.map(p => p.y).sort((a, b) => a - b);
+    let n = ys.length;
+    const qval = (arr, p) => arr[Math.max(0, Math.min(arr.length - 1, Math.floor(p * arr.length)))] || arr[0];
+    let q1 = qval(ys, 0.25), median = qval(ys, 0.5), q3 = qval(ys, 0.75);
+    let iqr = q3 - q1;
+    let lowerFence = q1 - 1.5 * iqr, upperFence = q3 + 1.5 * iqr;
+    let nonOutliers = ys.filter(v => v >= lowerFence && v <= upperFence);
+    let minW = nonOutliers.length ? nonOutliers[0] : ys[0];
+    let maxW = nonOutliers.length ? nonOutliers[nonOutliers.length - 1] : ys[ys.length - 1];
+    let mean = ys.reduce((a, v) => a + v, 0) / n;
+    let variance = ys.reduce((a, v) => a + Math.pow(v - mean, 2), 0) / n;
+    let stdDev = Math.sqrt(variance || 1);
+    let mode = computeMode(ys);
+    let outliers = ys.filter(v => v < lowerFence || v > upperFence);
+    return { q1, median, q3, iqr, lowerFence, upperFence, minW, maxW, min: ys[0], max: ys[ys.length - 1], mean, stdDev, mode, outliers };
+  }
+
+  function computeMode(values, bins = 24) {
+    if (values.length === 0) return NaN;
+    let minV = Math.min(...values), maxV = Math.max(...values);
+    let range = maxV - minV || 1;
+    let binW = range / bins;
+    let counts = new Array(bins).fill(0);
+    for (let v of values) {
+      let idx = Math.floor((v - minV) / binW);
+      if (idx === bins) idx = bins - 1;
+      counts[idx]++;
+    }
+    let bestIdx = counts.reduce((best, c, i) => c > counts[best] ? i : best, 0);
+    return minV + bestIdx * binW + binW / 2;
+  }
+
+  function drawScatter(data) {
+    p.noStroke(); p.fill(50, 100, 200, 180);
+    for (let pt of data) p.ellipse(pt.x, pt.y, 6, 6);
+  }
+
+  function drawQuadraticCurve(a, b, c) {
+    p.stroke(200, 0, 0); p.strokeWeight(2);
+    let xStart = 40, xEnd = p.width - 220;
+    p.noFill();
+    p.beginShape();
+    for (let x = xStart; x <= xEnd; x += 4) {
+      let y = a * x * x + b * x + c;
+      p.vertex(x, y);
+    }
+    p.endShape();
+    p.noStroke();
+  }
+
+  // Draw vertical boxplot with shaded IQR, whisker caps, mean/median/mode markers and outliers
+  function drawVerticalBoxPlot(cx, stats) {
+    let boxW = 40;
+    // shaded IQR
+    p.noStroke(); p.fill(245, 245, 255);
+    p.rectMode(p.CENTER);
+    p.rect(cx, (stats.q3 + stats.q1) / 2, boxW + 4, Math.max(8, stats.q1 - stats.q3));
+
+    // box border (rounded)
+    p.stroke(60); p.strokeWeight(1.2); p.noFill();
+    p.rect(cx, (stats.q3 + stats.q1) / 2, boxW, Math.max(6, stats.q1 - stats.q3), 6);
+
+    // median (bold)
+    p.stroke(10, 60, 160); p.strokeWeight(3);
+    p.line(cx - boxW / 2 - 6, stats.median, cx + boxW / 2 + 6, stats.median);
+
+    // mean marker
+    p.noStroke(); p.fill(120, 30, 180); p.ellipse(cx - 8, stats.mean, 8, 8);
+
+    // mode marker
+    p.fill(200, 80, 20);
+    let triSize = 8;
+    p.triangle(cx + 6, stats.mode - triSize / 2, cx + 6, stats.mode + triSize / 2, cx + 6 + triSize, stats.mode);
+
+    // whiskers to non-outlier ends
+    p.stroke(80); p.strokeWeight(1.5);
+    p.line(cx, stats.q3, cx, stats.maxW);
+    p.line(cx, stats.q1, cx, stats.minW);
+
+    // caps
+    p.strokeWeight(2);
+    p.line(cx - 10, stats.maxW, cx + 10, stats.maxW);
+    p.line(cx - 10, stats.minW, cx + 10, stats.minW);
+
+    // outliers
+    p.noStroke(); p.fill(220, 30, 30);
+    for (let v of stats.outliers) p.ellipse(cx + 2, v, 6, 6);
+
+    // annotations
+    p.fill(0); p.textSize(11); p.textAlign(p.LEFT, p.CENTER);
+    p.text(`Q1: ${stats.q1.toFixed(1)}`, cx + boxW / 2 + 12, stats.q1);
+    p.text(`Q3: ${stats.q3.toFixed(1)}`, cx + boxW / 2 + 12, stats.q3);
+    p.text(`IQR: ${stats.iqr.toFixed(1)}`, cx + boxW / 2 + 12, (stats.q1 + stats.q3) / 2);
+  }
+
+  // Single-sided vertical density to the right of the boxplot
+  function drawVerticalDensityRight(cx, stats) {
+    let meanY = stats.mean;
+    let stdDev = Math.max(stats.stdDev, 6);
+    let amp = 1 / (stdDev * Math.sqrt(2 * Math.PI));
+    let yStart = Math.max(10, meanY - 3 * stdDev);
+    let yEnd = Math.min(p.height - 10, meanY + 3 * stdDev);
+    let step = 1; let maxWidth = 80; let maxDensity = amp;
+
+    p.noStroke(); p.fill(0, 140, 40, 100);
+    p.beginShape(); p.vertex(cx, yStart);
+    for (let y = yStart; y <= yEnd; y += step) {
+      let density = amp * Math.exp(-0.5 * Math.pow((y - meanY) / stdDev, 2));
+      let x = cx + (density / maxDensity) * maxWidth;
+      p.vertex(x, y);
+    }
+    p.vertex(cx, yEnd); p.endShape(p.CLOSE);
+
+    // outline
+    p.noFill(); p.stroke(0, 110, 30); p.strokeWeight(1.2);
+    p.beginShape();
+    for (let y = yStart; y <= yEnd; y += step) {
+      let density = amp * Math.exp(-0.5 * Math.pow((y - meanY) / stdDev, 2));
+      let x = cx + (density / maxDensity) * maxWidth;
+      p.vertex(x, y);
+    }
+    p.endShape();
+
+    // mean marker (on ridge)
+    p.noStroke(); p.fill(120, 30, 180); p.ellipse(cx + 18, meanY, 8, 8);
+    // mode marker
+    p.fill(200, 80, 20);
+    p.triangle(cx + 6, stats.mode - 4, cx + 6, stats.mode + 4, cx + 14, stats.mode);
+  }
+
+  p.draw = () => {
+    p.background(255);
+
+    // scatter + regression curve
+    drawScatter(points);
+    drawQuadraticCurve(qa, qb, qc);
+
+    // animate t
+    if (autoPlay) { t += tSpeed * (speedSlider ? speedSlider.value() : 2); if (t > 1) t = 0; }
+
+    // position along quadratic curve (map t to x range)
+    let xStart = 60, xEnd = p.width - 220;
+    let boxX = p.lerp(xStart, xEnd, t);
+    let boxY = qa * boxX * boxX + qb * boxX + qc;
+
+    let stats = computeLocalYStats(boxX, 100);
+
+    // draw density and box (density offset so it doesn't overlap box)
+    drawVerticalDensityRight(boxX + 90, stats);
+    drawVerticalBoxPlot(boxX, stats);
+
+    // regression marker
+    p.noStroke(); p.fill(0); p.ellipse(boxX, boxY, 6, 6);
+
+    // UI text
+    p.fill(0); p.textSize(12); p.textAlign(p.LEFT, p.TOP);
+    p.text(`R² = ${r2.toFixed(3)}`, p.width - 150, 12);
+    p.text(`Center x: ${boxX.toFixed(1)}, y: ${boxY.toFixed(1)}`, 10, 36);
+    p.text(`Mean: ${stats.mean.toFixed(1)}   Median: ${stats.median.toFixed(1)}   Mode: ${stats.mode.toFixed(1)}`, 10, 54);
+    p.text(`Q1: ${stats.q1.toFixed(1)}   Q3: ${stats.q3.toFixed(1)}   IQR: ${stats.iqr.toFixed(1)}`, 10, 72);
+    p.text(`StdDev: ${stats.stdDev.toFixed(1)}   Outliers: ${stats.outliers.length}`, 10, 90);
+  };
+
+  p.mousePressed = () => {
+    for (let pt of points) {
+      if (p.dist(p.mouseX, p.mouseY, pt.x, pt.y) < 6) {
+        selectedPoint = pt; draggingPoint = true; return;
+      }
+    }
+  };
+
+  p.mouseDragged = () => {
+    if (draggingPoint && selectedPoint) {
+      selectedPoint.x = p.constrain(p.mouseX, 20, p.width - 20);
+      // snap y to quadratic curve while dragging
+      selectedPoint.y = qa * selectedPoint.x * selectedPoint.x + qb * selectedPoint.x + qc;
+    }
+  };
+
+  p.mouseReleased = () => {
+    if (draggingPoint) {
+      // update nearest baseX so regeneration keeps this change
+      let closestIdx = 0; let bestDist = Infinity;
+      for (let i = 0; i < baseXs.length; i++) {
+        let d = Math.abs(baseXs[i] - selectedPoint.x);
+        if (d < bestDist) { bestDist = d; closestIdx = i; }
+      }
+      baseXs[closestIdx] = selectedPoint.x;
+      baseYsNoNoise[closestIdx] = selectedPoint.y;
+      applyNoiseAndRecompute();
+    }
+    draggingPoint = false;
+  };
+
+  p.keyPressed = () => {
+    if (p.key === 'R' || p.key === 'r') { generateBaseData(); applyNoiseAndRecompute(); }
+    if (p.key === ' ') { autoPlay = !autoPlay; if (playPauseButton) playPauseButton.html(autoPlay ? 'Pause' : 'Play'); }
+  };
+};
+
+new p5(sketch);
