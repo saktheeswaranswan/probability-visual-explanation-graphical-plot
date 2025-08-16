@@ -2,6 +2,12 @@ You said:
 tell important plots likebox plot 
 ChatGPT said:
 
+https://stats.stackexchange.com/questions/12262/what-if-residuals-are-normally-distributed-but-y-is-not
+
+https://stats.stackexchange.com/questions/148803/how-does-linear-regression-use-the-normal-distribution
+
+https://stats.stackexchange.com/questions/12262/what-if-residuals-are-normally-distributed-but-y-is-not
+
 Got it — you’re asking for important data visualization plots like a box plot that are useful in statistics and analysis.
 
 Here’s a rundown of the most commonly used and important plots, grouped by purpose:
